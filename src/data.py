@@ -164,11 +164,19 @@ def build_compustat(raw_path: str, clean_path: str, config: dict) -> pd.DataFram
     df = df[df["capital_lag"] > 0]
     print(f"After requiring positive lagged capital: {len(df):,} (removed {before - len(df):,})")
 
+    # -----------------------------
     # Main empirical ratios
+    # -----------------------------
+    # Canonical definitions for the project:
+    # - investment     = capx / capital_lag
+    # - leverage       = debt / at
+    # - cash_ratio     = che / at
+    # - profitability  = oibdp / capital_lag
+    # These definitions should match the report and the simulated-moment targets.
     df["investment"] = df["capx"] / df["capital_lag"]
     df["leverage"] = df["debt"] / df["at"]
     df["cash_ratio"] = df["che"] / df["at"]
-    df["profitability"] = df["oibdp"] / df["at"]
+    df["profitability"] = df["oibdp"] / df["capital_lag"]
     df["sales_to_assets"] = df["sale"] / df["at"]
     df["depreciation_rate"] = df["dp"] / df["capital_lag"]
 
@@ -180,7 +188,7 @@ def build_compustat(raw_path: str, clean_path: str, config: dict) -> pd.DataFram
         df["liabilities_to_assets"] = df["lt"] / df["at"]
 
     if "ib" in df.columns:
-        df["income_to_assets"] = df["ib"] / df["at"]
+        df["income_to_capital"] = df["ib"] / df["capital_lag"]
 
     # -----------------------------
     # Remove pathological values

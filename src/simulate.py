@@ -37,7 +37,48 @@ def _get_simulation_settings(config: dict) -> dict:
         "debt_adjust_speed": float(sim_cfg.get("debt_adjust_speed", 0.15)),
         "cash_adjust_speed": float(sim_cfg.get("cash_adjust_speed", 0.10)),
         "investment_adjust_speed": float(sim_cfg.get("investment_adjust_speed", 0.35)),
+        "asset_multiplier": float(sim_cfg.get("asset_multiplier", 1.5)),
     }
+
+
+def _draw_simulation_shocks(sim: dict) -> dict:
+    """
+    Pre-draw all simulation shocks once.
+
+    This implements common random numbers (CRN): every time the SMM objective
+    is evaluated at a different parameter vector, the model uses the same
+    underlying shock realizations, which makes the objective function much
+    smoother for optimization.
+    """
+    n_firms = sim["n_firms"]
+    total_periods = sim["t_periods"] + sim["burn_in"]
+    seed = sim["seed"]
+
+    rng = np.random.default_rng(seed)
+
+    shocks = {
+        "investment": rng.standard_normal(size=(n_firms, total_periods)),
+        "leverage": rng.standard_normal(size=(n_firms, total_periods)),
+        "cash": rng.standard_normal(size=(n_firms, total_periods)),
+        "productivity": rng.standard_normal(size=(n_firms, total_periods)),
+    }
+
+    return shocks
+
+
+def _get_or_create_simulation_shocks(config: dict) -> dict:
+    """
+    Retrieve fixed simulation shocks from config if they already exist.
+    Otherwise create them once and store them in config.
+
+    Storing the shocks inside config keeps the architecture simple and ensures
+    that repeated calls during SMM estimation use identical random draws.
+    """
+    if "_simulation_shocks" not in config:
+        sim = _get_simulation_settings(config)
+        config["_simulation_shocks"] = _draw_simulation_shocks(sim)
+
+    return config["_simulation_shocks"]
 
 
 def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
@@ -48,6 +89,7 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
     theta_named = unpack_theta(theta)
     fixed = get_fixed_params(config)
     sim = _get_simulation_settings(config)
+    shocks = _get_or_create_simulation_shocks(config)
 
     psi = theta_named["psi"]
     lam = theta_named["lam"]
@@ -61,7 +103,6 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
     n_firms = sim["n_firms"]
     t_periods = sim["t_periods"]
     burn_in = sim["burn_in"]
-    seed = sim["seed"]
     initial_capital = sim["initial_capital"]
     initial_log_z = sim["initial_log_z"]
     start_year = sim["start_year"]
@@ -72,12 +113,12 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
     debt_adjust_speed = sim["debt_adjust_speed"]
     cash_adjust_speed = sim["cash_adjust_speed"]
     investment_adjust_speed = sim["investment_adjust_speed"]
-
-    rng = np.random.default_rng(seed)
+    asset_multiplier = sim["asset_multiplier"]
 
     rows = []
 
-    for firm_id in range(1, n_firms + 1):
+    for firm_index in range(n_firms):
+        firm_id = firm_index + 1
         k = initial_capital
         log_z = initial_log_z
 
@@ -85,18 +126,23 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
         z0 = float(np.exp(log_z))
         leverage = float(target_debt_ratio(z=z0, lam=lam))
         cash_ratio = float(target_cash_ratio(z=z0, lam=lam))
-        investment_rate = float(choose_investment_rate(z=z0, psi=psi))
+        investment_rate = float(choose_investment_rate(z=z0, psi=psi, lam=lam))
 
         for t in range(t_periods + burn_in):
             z = float(np.exp(log_z))
 
+            investment_shock = shocks["investment"][firm_index, t]
+            leverage_shock = shocks["leverage"][firm_index, t]
+            cash_shock = shocks["cash"][firm_index, t]
+            productivity_shock = shocks["productivity"][firm_index, t]
+
             # Persistent investment dynamics
-            i_target = float(choose_investment_rate(z=z, psi=psi))
+            i_target = float(choose_investment_rate(z=z, psi=psi, lam=lam))
             investment_rate = float(
                 np.clip(
                     (1.0 - investment_adjust_speed) * investment_rate
                     + investment_adjust_speed * i_target
-                    + sigma_i * rng.standard_normal(),
+                    + sigma_i * investment_shock,
                     -0.25,
                     1.00,
                 )
@@ -108,7 +154,7 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                 np.clip(
                     (1.0 - debt_adjust_speed) * leverage
                     + debt_adjust_speed * lev_target
-                    + sigma_lev * rng.standard_normal(),
+                    + sigma_lev * leverage_shock,
                     0.00,
                     0.95,
                 )
@@ -120,7 +166,7 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                 np.clip(
                     (1.0 - cash_adjust_speed) * cash_ratio
                     + cash_adjust_speed * cash_target
-                    + sigma_cash * rng.standard_normal(),
+                    + sigma_cash * cash_shock,
                     0.00,
                     0.80,
                 )
@@ -145,7 +191,19 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                 )
             )
 
-            assets = k
+            # Measurement layer:
+            # Productive capital in the model is k.
+            # To compare with accounting data, we construct a simple
+            # accounting-style asset measure as:
+            #
+            #     assets = asset_multiplier * k
+            #
+            # Debt and cash are generated from target leverage and cash ratios.
+            # This means leverage and cash ratios are currently policy-rule objects,
+            # not outcomes of a full balance-sheet identity. Making the mapping
+            # explicit prepares the code for future structural extensions where
+            # assets, debt, and cash will evolve endogenously.
+            assets = asset_multiplier * k
             debt = leverage * assets
             cash = cash_ratio * assets
 
@@ -169,6 +227,14 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                 )
             )
 
+            # Observables used for moment matching.
+            # Because debt and cash are generated from target ratios,
+            # these observed ratios are numerically equal to the policy
+            # variables leverage and cash_ratio. Keeping the accounting
+            # mapping explicit helps maintain consistency with the
+            # empirical definitions used in the Compustat data.
+            leverage_obs = debt / max(assets, 1e-8)
+            cash_ratio_obs = cash / max(assets, 1e-8)
             profitability = operating_profit / max(k, 1e-8)
 
             if t >= burn_in:
@@ -177,11 +243,12 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                         "gvkey": firm_id,
                         "fyear": start_year + (t - burn_in),
                         "capital": k,
+                        "assets": assets,
                         "productivity": z,
                         "investment": investment_rate,
-                        "leverage": leverage,
+                        "leverage": leverage_obs,
                         "profitability": profitability,
-                        "cash_ratio": cash_ratio,
+                        "cash_ratio": cash_ratio_obs,
                         "debt": debt,
                         "cash": cash,
                         "operating_profit": operating_profit,
@@ -198,11 +265,10 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
             )
             k = max(float(k_next), 1e-8)
 
-            shock = rng.standard_normal()
             log_z = float(
                 evolve_productivity(
                     log_z=log_z,
-                    shock=shock,
+                    shock=productivity_shock,
                     rho=rho,
                     sigma=sigma,
                 )

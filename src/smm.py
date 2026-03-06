@@ -40,9 +40,10 @@ def estimate_smm(theta0, bounds, m_data, W, config):
         bounds=bounds,
     )
 
-    theta_hat = result.x
+    theta_hat = np.asarray(result.x, dtype=float)
     m_sim_hat = simulate_moments(theta_hat, config)
-    objective_value = smm_objective(theta_hat, m_data, W, config)
+    diff_hat = np.asarray(m_data, dtype=float) - np.asarray(m_sim_hat, dtype=float)
+    objective_value = float(diff_hat.T @ W @ diff_hat)
 
     return {
         "theta_hat": theta_hat,

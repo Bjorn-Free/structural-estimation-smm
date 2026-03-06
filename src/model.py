@@ -21,8 +21,8 @@ def get_fixed_params(config=None):
         "alpha": 0.70,
         "delta": 0.12,
         "rho": 0.70,
-        "sigma": 0.45,            # increased volatility
-        "profit_intercept": -0.11, # calibrated closer to data mean profitability
+        "sigma": 0.45,
+        "profit_intercept": -0.11,
         "profit_shock_scale": 0.25,
     }
 
@@ -81,33 +81,92 @@ def evolve_productivity(log_z, shock, rho, sigma):
     """
     AR(1) productivity process in logs:
 
-        log z' = rho * log z + sigma * eps
+        log z' = rho * log_z + sigma * eps
     """
     return rho * log_z + sigma * shock
 
 
-def choose_investment_rate(z, psi, base_investment=0.18, sensitivity=0.35):
+def choose_investment_rate(
+    z,
+    psi,
+    lam=0.0,
+    base_investment=0.20,
+    z_sensitivity=0.55,
+    psi_penalty=0.035,
+    lam_penalty=0.12,
+):
     """
-    Simple investment policy rule.
+    Investment policy rule.
+
+    Economic interpretation:
+    - higher productivity raises investment
+    - higher adjustment costs (psi) reduce investment
+    - higher external finance costs (lam) also reduce investment
+
+    The productivity response is dampened by psi so that high adjustment
+    costs make investment less responsive to shocks.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
-    raw_i = base_investment + (sensitivity / (1.0 + psi)) * z_centered
+
+    raw_i = (
+        base_investment
+        + (z_sensitivity / (1.0 + psi)) * z_centered
+        - psi_penalty * psi
+        - lam_penalty * lam
+    )
+
     return np.clip(raw_i, -0.25, 1.00)
 
 
-def target_debt_ratio(z, lam, target=0.28, sensitivity=0.06):
+def target_debt_ratio(
+    z,
+    lam,
+    target=0.30,
+    z_sensitivity=0.10,
+    lam_penalty=0.55,
+):
     """
     Target leverage ratio.
+
+    Economic interpretation:
+    - more productive firms can sustain somewhat more debt
+    - higher external finance costs reduce target leverage materially
+
+    This makes lambda affect leverage moments more strongly than before.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
-    raw_lev = target + (sensitivity / (1.0 + lam)) * z_centered
+
+    raw_lev = (
+        target
+        + (z_sensitivity / (1.0 + 0.5 * lam)) * z_centered
+        - lam_penalty * lam
+    )
+
     return np.clip(raw_lev, 0.0, 0.95)
 
 
-def target_cash_ratio(z, lam, base_cash=0.20, sensitivity=0.04):
+def target_cash_ratio(
+    z,
+    lam,
+    base_cash=0.16,
+    z_sensitivity=-0.03,
+    lam_sensitivity=0.45,
+):
     """
     Target cash ratio.
+
+    Economic interpretation:
+    - higher external finance costs increase precautionary cash holdings
+    - firms with stronger productivity realizations hold slightly less cash
+
+    This gives lambda a stronger precautionary-savings channel.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
-    raw_cash = base_cash + 0.04 * lam + sensitivity * z_centered
+
+    raw_cash = (
+        base_cash
+        + lam_sensitivity * lam
+        + z_sensitivity * z_centered
+    )
+
     return np.clip(raw_cash, 0.0, 0.80)

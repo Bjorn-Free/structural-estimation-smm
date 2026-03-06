@@ -1,5 +1,6 @@
 from src.config import load_config
 from src.data import build_compustat, load_clean_data
+from src.diagnostics import run_parameter_diagnostics, print_parameter_diagnostics
 from src.moments import compute_moments, moment_names
 from src.reporting import (
     save_summary_statistics_table,
@@ -68,6 +69,33 @@ def main():
     print("Optimizer message:", est["message"])
     print("Objective value:", est["objective_value"])
     print("Simulated moments:", est["m_sim"])
+
+    # -----------------------------
+    # Parameter diagnostics
+    # -----------------------------
+    theta_hat = est["theta_hat"]
+
+    theta_diagnostics = [
+        config["theta0"],
+        theta_hat,
+        [float(theta_hat[0]) * 1.25, float(theta_hat[1])],   # higher psi
+        [float(theta_hat[0]), float(theta_hat[1]) * 1.25],   # higher lambda
+    ]
+
+    diagnostic_labels = [
+        "initial_guess",
+        "theta_hat",
+        "high_psi",
+        "high_lambda",
+    ]
+
+    df_diagnostics = run_parameter_diagnostics(
+        config=config,
+        theta_list=theta_diagnostics,
+        labels=diagnostic_labels,
+    )
+
+    print_parameter_diagnostics(df_diagnostics)
 
     print("\nSummary statistics table:")
     print(summary_df.to_string(index=False))

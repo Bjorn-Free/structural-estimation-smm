@@ -12,9 +12,6 @@ def _ensure_table_dir():
 
 
 def _format_numeric_table(df: pd.DataFrame, decimals: int = 4) -> pd.DataFrame:
-    """
-    Return a copy of the table with numeric columns rounded for presentation.
-    """
     out = df.copy()
     numeric_cols = out.select_dtypes(include=[np.number]).columns
     out[numeric_cols] = out[numeric_cols].round(decimals)
@@ -22,9 +19,6 @@ def _format_numeric_table(df: pd.DataFrame, decimals: int = 4) -> pd.DataFrame:
 
 
 def _save_table(df: pd.DataFrame, filename_stem: str, decimals: int = 4):
-    """
-    Save table as both CSV and LaTeX.
-    """
     _ensure_table_dir()
 
     df_pretty = _format_numeric_table(df, decimals=decimals)
@@ -45,21 +39,18 @@ def _save_table(df: pd.DataFrame, filename_stem: str, decimals: int = 4):
 
 
 def make_summary_statistics_table(df: pd.DataFrame):
-    """
-    Build summary statistics table for the cleaned Compustat sample.
-    """
-    variables = {
-        "investment": "investment",
-        "leverage": "leverage",
-        "profitability": "profitability",
-        "cash_ratio": "cash_ratio",
-        "sales_to_assets": "sales_to_assets",
-        "depreciation_rate": "depreciation_rate",
-    }
+    variables = [
+        ("Investment / Capital", "investment"),
+        ("Debt / Assets", "leverage"),
+        ("Operating Profit / Capital", "profitability"),
+        ("Cash / Assets", "cash_ratio"),
+        ("Sales / Assets", "sales_to_assets"),
+        ("Depreciation / Capital", "depreciation_rate"),
+    ]
 
     rows = []
 
-    for label, col in variables.items():
+    for label, col in variables:
         series = pd.to_numeric(df[col], errors="coerce").dropna()
 
         rows.append(
@@ -83,15 +74,32 @@ def save_summary_statistics_table(df: pd.DataFrame, decimals: int = 4):
 
 
 def make_moment_comparison_table(moment_labels, m_data, m_sim):
+    label_map = {
+        "mean_investment": "Mean investment",
+        "var_investment": "Variance investment",
+        "autocorr_investment": "Autocorrelation investment",
+        "mean_leverage": "Mean leverage",
+        "var_leverage": "Variance leverage",
+        "autocorr_leverage": "Autocorrelation leverage",
+        "mean_profitability": "Mean profitability",
+        "var_profitability": "Variance profitability",
+        "autocorr_profitability": "Autocorrelation profitability",
+        "mean_cash_ratio": "Mean cash ratio",
+        "var_cash_ratio": "Variance cash ratio",
+        "autocorr_cash_ratio": "Autocorrelation cash ratio",
+    }
+
+    pretty_labels = [label_map.get(x, x) for x in moment_labels]
+
     df = pd.DataFrame(
         {
-            "moment": moment_labels,
-            "data": np.asarray(m_data, dtype=float),
-            "simulated": np.asarray(m_sim, dtype=float),
+            "Moment": pretty_labels,
+            "Data": np.asarray(m_data, dtype=float),
+            "Simulated": np.asarray(m_sim, dtype=float),
         }
     )
-    df["gap"] = df["simulated"] - df["data"]
-    df["abs_gap"] = df["gap"].abs()
+    df["Gap"] = df["Simulated"] - df["Data"]
+    df["Absolute gap"] = df["Gap"].abs()
     return df
 
 
@@ -106,9 +114,15 @@ def make_parameter_table(theta_hat, param_names=None, std_errors=None):
     if param_names is None:
         param_names = [f"theta_{i}" for i in range(len(theta_hat))]
 
+    param_map = {
+        "psi_adjustment_cost": r"$\psi$ adjustment cost",
+        "lambda_external_finance_cost": r"$\lambda$ external finance cost",
+    }
+    pretty_names = [param_map.get(x, x) for x in param_names]
+
     df = pd.DataFrame(
         {
-            "parameter": param_names,
+            "parameter": pretty_names,
             "estimate": theta_hat,
         }
     )
@@ -128,16 +142,16 @@ def make_estimation_settings_table(config, objective_value, weighting_matrix_nam
     sim_cfg = config.get("simulation", {})
 
     rows = [
-        {"setting": "weighting_matrix", "value": weighting_matrix_name},
-        {"setting": "objective_value", "value": float(objective_value)},
-        {"setting": "rebuild_data", "value": config.get("rebuild_data", False)},
-        {"setting": "n_moments", "value": config.get("n_moments")},
-        {"setting": "theta0", "value": str(config.get("theta0"))},
-        {"setting": "bounds", "value": str(config.get("bounds"))},
-        {"setting": "n_firms", "value": sim_cfg.get("n_firms")},
-        {"setting": "t_periods", "value": sim_cfg.get("t_periods")},
-        {"setting": "burn_in", "value": sim_cfg.get("burn_in")},
-        {"setting": "seed", "value": sim_cfg.get("seed")},
+        {"setting": "Weighting matrix", "value": weighting_matrix_name},
+        {"setting": "Objective value", "value": float(objective_value)},
+        {"setting": "Rebuild data", "value": config.get("rebuild_data", False)},
+        {"setting": "Number of moments", "value": config.get("n_moments")},
+        {"setting": "Initial parameter guess", "value": str(config.get("theta0"))},
+        {"setting": "Bounds", "value": str(config.get("bounds"))},
+        {"setting": "Number of firms", "value": sim_cfg.get("n_firms")},
+        {"setting": "Simulation periods", "value": sim_cfg.get("t_periods")},
+        {"setting": "Burn-in periods", "value": sim_cfg.get("burn_in")},
+        {"setting": "Random seed", "value": sim_cfg.get("seed")},
     ]
 
     return pd.DataFrame(rows)

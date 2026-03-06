@@ -2,22 +2,34 @@
   "rebuild_data": false,
   "raw_data_path": "data/raw/compustat_raw.csv",
   "clean_data_path": "data/clean/compustat_clean.csv",
+
   "theta0": [0.1, 0.1],
-  "bounds": [[0.0001, 10.0], [0.0001, 10.0]],
+
+  "bounds": [
+    [0.0001, 10.0],
+    [0.0001, 10.0]
+  ],
+
   "n_moments": 12,
+
   "simulation": {
     "n_firms": 2000,
     "t_periods": 60,
     "burn_in": 10,
     "seed": 123,
+
     "initial_capital": 100.0,
     "initial_log_z": 0.0,
     "start_year": 2000,
-    "sigma_i": 0.20,
-    "sigma_lev": 0.08,
-    "sigma_cash": 0.05,
-    "debt_adjust_speed": 0.15,
-    "cash_adjust_speed": 0.10,
-    "investment_adjust_speed": 0.55
+
+    "sigma_i": 0.22,
+    "sigma_lev": 0.12,
+    "sigma_cash": 0.07,
+
+    "debt_adjust_speed": 0.22,
+    "cash_adjust_speed": 0.14,
+    "investment_adjust_speed": 0.40,
+
+    "asset_multiplier": 1.5
   }
 }
