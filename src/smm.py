@@ -1,24 +1,56 @@
 import numpy as np
+from scipy.optimize import minimize
+
+from src.simulate import simulate_moments
 
 
-def make_weighting_matrix(data_df, config: dict) -> np.ndarray:
+def make_weighting_matrix(df, config):
     """
-    Placeholder weighting matrix for SMM.
-    For now: identity matrix.
+    Create the SMM weighting matrix.
+
+    For now, use the identity matrix.
     """
-    n_moments = int(config.get("n_moments", 2))
+    n_moments = int(config["n_moments"])
     return np.eye(n_moments)
 
 
-def estimate_smm(theta0, bounds, data_mom: np.ndarray, W: np.ndarray, config: dict) -> dict:
+def smm_objective(theta, m_data, W, config):
     """
-    Placeholder SMM estimator.
-    For now: just returns the starting values.
+    SMM objective:
+        Q(theta) = (m_data - m_sim(theta))' W (m_data - m_sim(theta))
     """
-    theta_hat = np.array(theta0, dtype=float)
+    m_sim = simulate_moments(theta, config)
+    diff = np.asarray(m_data, dtype=float) - np.asarray(m_sim, dtype=float)
+    obj = float(diff.T @ W @ diff)
+    return obj
+
+
+def estimate_smm(theta0, bounds, m_data, W, config):
+    """
+    Estimate structural parameters by minimizing the SMM objective.
+    """
+    theta0 = np.asarray(theta0, dtype=float)
+    bounds = [tuple(b) for b in bounds]
+
+    result = minimize(
+        fun=smm_objective,
+        x0=theta0,
+        args=(m_data, W, config),
+        method="L-BFGS-B",
+        bounds=bounds,
+    )
+
+    theta_hat = result.x
+    m_sim_hat = simulate_moments(theta_hat, config)
+    objective_value = smm_objective(theta_hat, m_data, W, config)
 
     return {
         "theta_hat": theta_hat,
-        "objective_value": None,
-        "converged": True
+        "objective_value": objective_value,
+        "m_data": np.asarray(m_data, dtype=float),
+        "m_sim": np.asarray(m_sim_hat, dtype=float),
+        "success": result.success,
+        "message": result.message,
+        "n_iter": result.nit,
+        "optimizer_result": result,
     }

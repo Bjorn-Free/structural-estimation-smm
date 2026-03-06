@@ -9,21 +9,36 @@ def main():
 
     # Rebuild cleaned data if requested
     if config.get("rebuild_data", False):
-        build_compustat(config["raw_data_path"], config["clean_data_path"], config)
+        build_compustat(
+            config["raw_data_path"],
+            config["clean_data_path"],
+            config,
+        )
 
     # Load cleaned data
     df = load_clean_data(config["clean_data_path"])
 
-    # Moments + weighting matrix
+    # Data moments + weighting matrix
     m_data = compute_moments(df, config)
     W = make_weighting_matrix(df, config)
 
-    # SMM estimation (placeholder for now)
-    est = estimate_smm(config["theta0"], config["bounds"], m_data, W, config)
+    # SMM estimation
+    est = estimate_smm(
+        config["theta0"],
+        config["bounds"],
+        m_data,
+        W,
+        config,
+    )
 
+    # Print results
     print("Moment names:", moment_names(config))
     print("Data moments:", m_data)
     print("Theta hat:", est["theta_hat"])
+    print("Optimizer success:", est["success"])
+    print("Optimizer message:", est["message"])
+    print("Objective value:", est["objective_value"])
+    print("Simulated moments:", est["m_sim"])
 
 
 if __name__ == "__main__":
