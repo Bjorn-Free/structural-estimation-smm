@@ -1,0 +1,8 @@
+{
+  "rebuild_data": true,
+  "raw_data_path": "data/raw/compustat_raw.csv",
+  "clean_data_path": "data/clean/compustat_clean.csv",
+  "theta0": [0.1, 0.1],
+  "bounds": [[0.0001, 10.0], [0.0001, 10.0]],
+  "n_moments": 2
+}
