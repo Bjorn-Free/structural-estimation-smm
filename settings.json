@@ -1,4 +1,6 @@
 {
+  "debug_mode": false,
+
   "rebuild_data": false,
   "raw_data_path": "data/raw/compustat_raw.csv",
   "clean_data_path": "data/clean/compustat_clean.csv",
@@ -18,8 +20,8 @@
     "rho": 0.70,
     "sigma": 0.40,
     "profit_intercept": 0.00,
-    "production_scale": 0.55,
-    "fixed_cost": 18.0
+    "production_scale": 0.60,
+    "fixed_cost": 12.0
   },
 
   "simulation": {

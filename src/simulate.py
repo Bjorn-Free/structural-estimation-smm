@@ -122,6 +122,8 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
     rho = fixed["rho"]
     sigma = fixed["sigma"]
     profit_intercept = fixed["profit_intercept"]
+    production_scale = fixed["production_scale"]
+    fixed_cost = fixed["fixed_cost"]
 
     n_firms = sim["n_firms"]
     t_periods = sim["t_periods"]
@@ -235,6 +237,8 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                     z=z,
                     alpha=alpha,
                     profit_intercept=profit_intercept,
+                    production_scale=production_scale,
+                    fixed_cost=fixed_cost,
                 )
             )
 
@@ -319,3 +323,13 @@ def simulate_moments(theta, config: dict):
 
     df_sim = simulate_firm_panel(theta, config)
     return compute_moments(df_sim, config)
+
+
+def simulate_panel(theta, config: dict) -> pd.DataFrame:
+    """
+    Public wrapper that returns the simulated panel.
+
+    This is used by diagnostics and plotting code that needs access to the
+    full simulated panel, not just the model moments.
+    """
+    return simulate_firm_panel(theta, config)

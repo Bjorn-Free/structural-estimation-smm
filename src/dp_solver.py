@@ -8,7 +8,20 @@ def get_dp_settings(config: dict) -> dict:
     """
     Read dynamic-programming settings from config.
     """
-    dp_cfg = config.get("dp", {})
+
+    dp_cfg = config.get("dp", {}).copy()
+
+    # --------------------------------------------------
+    # DEBUG MODE SPEED REDUCTION
+    # --------------------------------------------------
+    debug = config.get("debug_mode", False)
+
+    if debug:
+
+        dp_cfg["k_grid_size"] = min(dp_cfg.get("k_grid_size", 41), 15)
+        dp_cfg["z_grid_size"] = min(dp_cfg.get("z_grid_size", 7), 5)
+        dp_cfg["control_grid_size"] = min(dp_cfg.get("control_grid_size", 181), 41)
+        dp_cfg["max_iter"] = min(dp_cfg.get("max_iter", 500), 200)
 
     return {
         "beta": float(dp_cfg.get("beta", 0.95)),
@@ -47,11 +60,9 @@ def tauchen(rho: float, sigma: float, n: int, m: float = 3.0):
     Returns
     -------
     grid : ndarray
-        Discretized state grid for x.
-
     transition : ndarray
-        Markov transition matrix of shape (n, n).
     """
+
     if n < 2:
         raise ValueError("Tauchen discretization requires n >= 2.")
 
@@ -66,29 +77,30 @@ def tauchen(rho: float, sigma: float, n: int, m: float = 3.0):
 
     for i in range(n):
         for j in range(n):
+
             if j == 0:
                 z_upper = (grid[j] - rho * grid[i] + step / 2.0) / sigma
                 transition[i, j] = _std_norm_cdf(z_upper)
+
             elif j == n - 1:
                 z_lower = (grid[j] - rho * grid[i] - step / 2.0) / sigma
                 transition[i, j] = 1.0 - _std_norm_cdf(z_lower)
+
             else:
                 z_upper = (grid[j] - rho * grid[i] + step / 2.0) / sigma
                 z_lower = (grid[j] - rho * grid[i] - step / 2.0) / sigma
                 transition[i, j] = _std_norm_cdf(z_upper) - _std_norm_cdf(z_lower)
 
     transition = transition / transition.sum(axis=1, keepdims=True)
+
     return grid, transition
 
 
 def build_k_grid(config: dict) -> np.ndarray:
     """
     Capital grid.
-
-    We now use a log-spaced grid so the solver has better resolution in the
-    low-capital region, where the current model's economics are especially
-    important for determining whether the policy collapses to the floor.
     """
+
     dp = get_dp_settings(config)
 
     k_min = float(dp["k_min"])
@@ -96,18 +108,15 @@ def build_k_grid(config: dict) -> np.ndarray:
     n = int(dp["k_grid_size"])
 
     grid = np.exp(np.linspace(np.log(k_min), np.log(k_max), n))
+
     return grid.astype(float)
 
 
 def build_kprime_grid(config: dict, current_k: float, delta: float) -> np.ndarray:
     """
-    Control grid for next-period capital k'.
-
-    We construct this from the allowed investment-rate bounds:
-        k' = (1 - delta + i) * k
-
-    The feasible k' set is intersected with the support of the k-grid itself.
+    Control grid for next-period capital k'
     """
+
     dp = get_dp_settings(config)
 
     i_min = float(dp["investment_min"])
@@ -132,14 +141,14 @@ def build_kprime_grid(config: dict, current_k: float, delta: float) -> np.ndarra
         kprime_min = 1e-8
 
     grid = np.exp(np.linspace(np.log(kprime_min), np.log(kprime_max), n))
+
     return grid.astype(float)
 
 
 def build_z_process(config: dict, fixed_params: dict):
-    """
-    Discretize the productivity process in logs and map to levels.
-    """
+
     dp = get_dp_settings(config)
+
     rho = float(fixed_params["rho"])
     sigma = float(fixed_params["sigma"])
 
@@ -151,37 +160,20 @@ def build_z_process(config: dict, fixed_params: dict):
     )
 
     z_grid = np.exp(log_z_grid)
+
     return log_z_grid.astype(float), z_grid.astype(float), transition.astype(float)
 
 
-def investment_rate_from_kprime(k: float, kprime: float, delta: float) -> float:
-    """
-    Recover the investment rate implied by choosing next-period capital:
+def investment_rate_from_kprime(k: float, kprime: float, delta: float):
 
-        i = k'/k - (1 - delta)
-    """
     k = max(float(k), 1e-8)
     kprime = max(float(kprime), 1e-8)
+
     return float((kprime / k) - (1.0 - delta))
 
 
 def one_period_payoff_from_kprime(k, z, kprime, psi, fixed_params):
-    """
-    One-period payoff for the minimal (k, z) investment model when the control
-    is next-period capital k'.
 
-    Current simplified objective:
-        payoff = operating profit - investment expenditure - adjustment cost
-
-    with investment implied by:
-        i = k'/k - (1 - delta)
-
-    Economic interpretation of the current version:
-    - profits are concave in capital
-    - there is a fixed operating cost
-    - this should make very small firms unattractive and help create an
-      interior capital target
-    """
     alpha = float(fixed_params["alpha"])
     delta = float(fixed_params["delta"])
     profit_intercept = float(fixed_params["profit_intercept"])
@@ -200,6 +192,7 @@ def one_period_payoff_from_kprime(k, z, kprime, psi, fixed_params):
     )
 
     investment_expenditure = i_rate * max(float(k), 1e-8)
+
     adj_cost = adjustment_cost(
         k=k,
         investment_rate=i_rate,
@@ -207,17 +200,17 @@ def one_period_payoff_from_kprime(k, z, kprime, psi, fixed_params):
     )
 
     payoff = prof - investment_expenditure - adj_cost
+
     return float(payoff), float(i_rate)
 
 
-def linear_interp_1d(x_grid: np.ndarray, y_values: np.ndarray, x: float) -> float:
-    """
-    1D linear interpolation with flat extrapolation at the boundaries.
-    """
+def linear_interp_1d(x_grid: np.ndarray, y_values: np.ndarray, x: float):
+
     x = float(x)
 
     if x <= x_grid[0]:
         return float(y_values[0])
+
     if x >= x_grid[-1]:
         return float(y_values[-1])
 
@@ -230,32 +223,34 @@ def linear_interp_1d(x_grid: np.ndarray, y_values: np.ndarray, x: float) -> floa
     y1 = y_values[idx + 1]
 
     weight = (x - x0) / (x1 - x0)
+
     return float((1.0 - weight) * y0 + weight * y1)
 
 
 def expected_continuation_value(k_next, iz, V, k_grid, z_transition):
-    """
-    Compute E[V(k', z') | current z-index = iz] using interpolation over k.
-    """
+
     probs = z_transition[iz]
+
     expected_value = 0.0
 
     for iz_next in range(len(probs)):
+
         V_next_z = V[:, iz_next]
+
         cont_value = linear_interp_1d(k_grid, V_next_z, k_next)
+
         expected_value += probs[iz_next] * cont_value
 
     return float(expected_value)
 
 
-def compute_policy_bound_shares(policy_i: np.ndarray, config: dict) -> dict:
-    """
-    Compute the fraction of policy points at or extremely near the lower
-    and upper investment bounds.
-    """
+def compute_policy_bound_shares(policy_i: np.ndarray, config: dict):
+
     dp = get_dp_settings(config)
+
     i_min = float(dp["investment_min"])
     i_max = float(dp["investment_max"])
+
     tol_low = float(dp["policy_lower_bound_tolerance"])
     tol_high = float(dp["policy_upper_bound_tolerance"])
 
@@ -271,54 +266,24 @@ def compute_policy_bound_shares(policy_i: np.ndarray, config: dict) -> dict:
 
 
 def solve_investment_dp(theta, config: dict, fixed_params: dict):
-    """
-    Solve the minimal dynamic investment model with states (k, z)
-    and control k' using value function iteration.
 
-    Parameters
-    ----------
-    theta : array-like
-        Parameter vector. theta[0] = psi is used here.
-        theta[1] = lambda is ignored at this stage.
-
-    config : dict
-        Project configuration.
-
-    fixed_params : dict
-        Fixed model parameters.
-
-    Returns
-    -------
-    dict containing:
-    - k_grid
-    - log_z_grid
-    - z_grid
-    - z_transition
-    - value_function
-    - policy_kprime
-    - policy_investment
-    - converged
-    - n_iter
-    - max_diff
-    - share_lower_bound
-    - share_upper_bound
-    - share_any_bound
-    - share_interior
-    """
     theta = np.asarray(theta, dtype=float)
     psi = float(theta[0])
 
     dp = get_dp_settings(config)
+
     beta = float(dp["beta"])
     delta = float(fixed_params["delta"])
 
     k_grid = build_k_grid(config)
+
     log_z_grid, z_grid, z_transition = build_z_process(config, fixed_params)
 
     nk = len(k_grid)
     nz = len(z_grid)
 
     V = np.zeros((nk, nz), dtype=float)
+
     policy_kprime = np.zeros((nk, nz), dtype=float)
     policy_i = np.zeros((nk, nz), dtype=float)
 
@@ -326,9 +291,11 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
     max_diff = np.inf
 
     for it in range(dp["max_iter"]):
+
         V_new = np.zeros_like(V)
 
         for ik, k in enumerate(k_grid):
+
             kprime_grid = build_kprime_grid(
                 config=config,
                 current_k=k,
@@ -336,8 +303,11 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
             )
 
             for iz, z in enumerate(z_grid):
+
                 best_value = -np.inf
+
                 best_kprime = kprime_grid[0]
+
                 best_i = investment_rate_from_kprime(
                     k=k,
                     kprime=kprime_grid[0],
@@ -345,6 +315,7 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
                 )
 
                 for kprime in kprime_grid:
+
                     payoff, i_rate = one_period_payoff_from_kprime(
                         k=k,
                         z=z,
@@ -364,6 +335,7 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
                     candidate_value = payoff + beta * continuation
 
                     if candidate_value > best_value:
+
                         best_value = candidate_value
                         best_kprime = kprime
                         best_i = i_rate
@@ -373,6 +345,7 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
                 policy_i[ik, iz] = best_i
 
         max_diff = float(np.max(np.abs(V_new - V)))
+
         V = V_new
 
         if max_diff < dp["tol"]:
@@ -400,18 +373,14 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
 
 
 def interpolate_policy_investment(k, log_z, solution):
-    """
-    Evaluate the solved investment policy approximately at continuous states.
 
-    Strategy:
-    - nearest-neighbor in log z
-    - linear interpolation in k
-    """
     k_grid = solution["k_grid"]
     log_z_grid = solution["log_z_grid"]
+
     policy_i = solution["policy_investment"]
 
     iz = int(np.argmin(np.abs(log_z_grid - log_z)))
+
     policy_slice = policy_i[:, iz]
 
     return linear_interp_1d(k_grid, policy_slice, k)
