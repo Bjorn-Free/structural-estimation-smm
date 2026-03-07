@@ -16,6 +16,9 @@ def unpack_theta(theta):
 def get_fixed_params(config=None):
     """
     Fixed model parameters.
+
+    This project is transitioning from a policy-rule approximation to a solved
+    dynamic model. These are the core economic primitives shared across both.
     """
     return {
         "alpha": 0.70,
@@ -30,8 +33,6 @@ def get_fixed_params(config=None):
 def profit_rate(z, alpha, profit_intercept):
     """
     Profitability rate per unit of capital.
-
-    Designed to roughly match empirical profitability moments.
     """
     z = np.maximum(z, 1e-8)
     return profit_intercept + (z ** alpha) - 1.0
@@ -90,28 +91,27 @@ def choose_investment_rate(
     z,
     psi,
     lam=0.0,
-    base_investment=0.20,
-    z_sensitivity=0.55,
-    psi_penalty=0.035,
-    lam_penalty=0.12,
+    base_investment=0.265,
+    z_sensitivity=0.32,
+    psi_response_scale=0.60,
+    psi_level_penalty=0.012,
+    lam_penalty=0.10,
 ):
     """
-    Investment policy rule.
+    Legacy policy-rule investment function.
 
-    Economic interpretation:
-    - higher productivity raises investment
-    - higher adjustment costs (psi) reduce investment
-    - higher external finance costs (lam) also reduce investment
-
-    The productivity response is dampened by psi so that high adjustment
-    costs make investment less responsive to shocks.
+    This remains available for fallback/debugging comparisons, but the project
+    is now transitioning toward a solved dynamic policy from dp_solver.py.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
 
+    effective_z_sensitivity = z_sensitivity / (1.0 + psi_response_scale * psi)
+    psi_drag = psi_level_penalty * np.log1p(np.maximum(psi, 0.0))
+
     raw_i = (
         base_investment
-        + (z_sensitivity / (1.0 + psi)) * z_centered
-        - psi_penalty * psi
+        + effective_z_sensitivity * z_centered
+        - psi_drag
         - lam_penalty * lam
     )
 
@@ -128,11 +128,9 @@ def target_debt_ratio(
     """
     Target leverage ratio.
 
-    Economic interpretation:
-    - more productive firms can sustain somewhat more debt
-    - higher external finance costs reduce target leverage materially
-
-    This makes lambda affect leverage moments more strongly than before.
+    This is still a reduced-form placeholder. Debt will become a true choice
+    variable once the model expands from the minimal (k,z) dynamic stage to
+    the debt-augmented state space.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
 
@@ -155,11 +153,8 @@ def target_cash_ratio(
     """
     Target cash ratio.
 
-    Economic interpretation:
-    - higher external finance costs increase precautionary cash holdings
-    - firms with stronger productivity realizations hold slightly less cash
-
-    This gives lambda a stronger precautionary-savings channel.
+    This is still a reduced-form placeholder. Cash will become a true state
+    and control variable once the model expands to the full structural version.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
 

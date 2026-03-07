@@ -1,14 +1,57 @@
+import numpy as np
+import pandas as pd
+
 from src.config import load_config
 from src.data import build_compustat, load_clean_data
-from src.diagnostics import run_parameter_diagnostics, print_parameter_diagnostics
+from src.dp_solver import solve_investment_dp
+from src.model import get_fixed_params
 from src.moments import compute_moments, moment_names
-from src.reporting import (
-    save_summary_statistics_table,
-    save_moment_comparison_table,
-    save_parameter_table,
-    save_estimation_settings_table,
-)
-from src.smm import make_weighting_matrix, estimate_smm
+from src.reporting import save_summary_statistics_table
+from src.simulate import simulate_moments
+
+
+def build_policy_summary_table(solution, psi_value):
+    """
+    Summarize the solved investment policy function at a few representative
+    grid points for quick inspection.
+    """
+    k_grid = solution["k_grid"]
+    z_grid = solution["z_grid"]
+    policy_i = solution["policy_investment"]
+
+    k_indices = [0, len(k_grid) // 2, len(k_grid) - 1]
+    z_indices = [0, len(z_grid) // 2, len(z_grid) - 1]
+
+    rows = []
+    for ik in k_indices:
+        for iz in z_indices:
+            rows.append(
+                {
+                    "psi": float(psi_value),
+                    "k_index": int(ik),
+                    "z_index": int(iz),
+                    "k": float(k_grid[ik]),
+                    "z": float(z_grid[iz]),
+                    "investment_policy": float(policy_i[ik, iz]),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def build_moment_comparison_table(labels, m_data, scenario_results):
+    """
+    Build a table comparing data moments with simulated moments across
+    fixed-parameter DP validation scenarios.
+    """
+    out = pd.DataFrame({"moment": labels, "data": np.asarray(m_data, dtype=float)})
+
+    for result in scenario_results:
+        scenario_label = result["label"]
+        out[f"sim_{scenario_label}"] = np.asarray(result["m_sim"], dtype=float)
+        out[f"gap_{scenario_label}"] = out["data"] - out[f"sim_{scenario_label}"]
+
+    return out
 
 
 def main():
@@ -22,102 +65,101 @@ def main():
         )
 
     df = load_clean_data(config["clean_data_path"])
+    fixed = get_fixed_params(config)
 
+    # --------------------------------------------------
+    # Data moments
+    # --------------------------------------------------
     m_data = compute_moments(df, config)
-    W = make_weighting_matrix(df, config)
-
-    est = estimate_smm(
-        config["theta0"],
-        config["bounds"],
-        m_data,
-        W,
-        config,
-    )
-
     labels = moment_names(config)
 
+    # --------------------------------------------------
+    # Save summary statistics table
+    # --------------------------------------------------
     summary_df, summary_csv, summary_tex = save_summary_statistics_table(
         df=df,
         decimals=4,
     )
 
-    comparison_df, comparison_csv, comparison_tex = save_moment_comparison_table(
-        moment_labels=labels,
+    # --------------------------------------------------
+    # DP validation scenarios
+    # Keep lambda fixed for now because lambda is not yet inside the DP solver.
+    # --------------------------------------------------
+    validation_thetas = [
+        {"label": "psi_0p05", "theta": np.array([0.05, 0.05], dtype=float)},
+        {"label": "psi_0p10", "theta": np.array([0.10, 0.05], dtype=float)},
+        {"label": "psi_0p50", "theta": np.array([0.50, 0.05], dtype=float)},
+        {"label": "psi_1p00", "theta": np.array([1.00, 0.05], dtype=float)},
+    ]
+
+    scenario_results = []
+    policy_tables = []
+
+    for scenario in validation_thetas:
+        label = scenario["label"]
+        theta = scenario["theta"]
+        psi_value = float(theta[0])
+
+        solution = solve_investment_dp(
+            theta=theta,
+            config=config,
+            fixed_params=fixed,
+        )
+
+        m_sim = simulate_moments(theta, config)
+
+        scenario_results.append(
+            {
+                "label": label,
+                "theta": theta,
+                "psi": psi_value,
+                "solution": solution,
+                "m_sim": np.asarray(m_sim, dtype=float),
+            }
+        )
+
+        policy_tables.append(
+            build_policy_summary_table(
+                solution=solution,
+                psi_value=psi_value,
+            )
+        )
+
+    policy_summary_df = pd.concat(policy_tables, axis=0, ignore_index=True)
+    moment_validation_df = build_moment_comparison_table(
+        labels=labels,
         m_data=m_data,
-        m_sim=est["m_sim"],
-        decimals=4,
+        scenario_results=scenario_results,
     )
 
-    param_df, param_csv, param_tex = save_parameter_table(
-        theta_hat=est["theta_hat"],
-        param_names=["psi_adjustment_cost", "lambda_external_finance_cost"],
-        std_errors=None,
-        decimals=4,
-    )
-
-    settings_df, settings_csv, settings_tex = save_estimation_settings_table(
-        config=config,
-        objective_value=est["objective_value"],
-        weighting_matrix_name="Identity",
-        decimals=4,
-    )
-
+    # --------------------------------------------------
+    # Console output
+    # --------------------------------------------------
     print("Moment names:", labels)
     print("Data moments:", m_data)
-    print("Theta hat:", est["theta_hat"])
-    print("Optimizer success:", est["success"])
-    print("Optimizer message:", est["message"])
-    print("Objective value:", est["objective_value"])
-    print("Simulated moments:", est["m_sim"])
 
-    # -----------------------------
-    # Parameter diagnostics
-    # -----------------------------
-    theta_hat = est["theta_hat"]
+    print("\nDynamic programming validation results:")
+    for result in scenario_results:
+        solution = result["solution"]
+        print(f"\nScenario: {result['label']}")
+        print("Theta:", result["theta"])
+        print("Solver converged:", solution["converged"])
+        print("Iterations:", solution["n_iter"])
+        print("Final Bellman sup norm:", solution["max_diff"])
+        print("Simulated moments:", result["m_sim"])
 
-    theta_diagnostics = [
-        config["theta0"],
-        theta_hat,
-        [float(theta_hat[0]) * 1.25, float(theta_hat[1])],   # higher psi
-        [float(theta_hat[0]), float(theta_hat[1]) * 1.25],   # higher lambda
-    ]
+    print("\nPolicy function summary table:")
+    print(policy_summary_df.to_string(index=False))
 
-    diagnostic_labels = [
-        "initial_guess",
-        "theta_hat",
-        "high_psi",
-        "high_lambda",
-    ]
-
-    df_diagnostics = run_parameter_diagnostics(
-        config=config,
-        theta_list=theta_diagnostics,
-        labels=diagnostic_labels,
-    )
-
-    print_parameter_diagnostics(df_diagnostics)
+    print("\nMoment validation table:")
+    print(moment_validation_df.to_string(index=False))
 
     print("\nSummary statistics table:")
     print(summary_df.to_string(index=False))
 
-    print("\nMoment comparison table:")
-    print(comparison_df.to_string(index=False))
-
-    print("\nParameter estimates table:")
-    print(param_df.to_string(index=False))
-
-    print("\nEstimation settings table:")
-    print(settings_df.to_string(index=False))
-
     print("\nSaved tables:")
     print(f"- {summary_csv}")
     print(f"- {summary_tex}")
-    print(f"- {comparison_csv}")
-    print(f"- {comparison_tex}")
-    print(f"- {param_csv}")
-    print(f"- {param_tex}")
-    print(f"- {settings_csv}")
-    print(f"- {settings_tex}")
 
 
 if __name__ == "__main__":

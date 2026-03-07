@@ -28,8 +28,27 @@
 
     "debt_adjust_speed": 0.22,
     "cash_adjust_speed": 0.14,
-    "investment_adjust_speed": 0.40,
+    "investment_adjust_speed": 0.65,
 
-    "asset_multiplier": 1.5
+    "asset_multiplier": 1.5,
+    "use_dynamic_solver": true
+  },
+
+  "dp": {
+    "beta": 0.95,
+
+    "k_grid_size": 25,
+    "k_min": 20.0,
+    "k_max": 250.0,
+
+    "z_grid_size": 7,
+    "tauchen_m": 3.0,
+
+    "control_grid_size": 41,
+    "investment_min": -0.20,
+    "investment_max": 0.80,
+
+    "max_iter": 500,
+    "tol": 1e-6
   }
 }

@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from src.dp_solver import solve_investment_dp, interpolate_policy_investment
 from src.model import (
     unpack_theta,
     get_fixed_params,
@@ -36,8 +37,9 @@ def _get_simulation_settings(config: dict) -> dict:
         "sigma_cash": float(sim_cfg.get("sigma_cash", 0.05)),
         "debt_adjust_speed": float(sim_cfg.get("debt_adjust_speed", 0.15)),
         "cash_adjust_speed": float(sim_cfg.get("cash_adjust_speed", 0.10)),
-        "investment_adjust_speed": float(sim_cfg.get("investment_adjust_speed", 0.35)),
+        "investment_adjust_speed": float(sim_cfg.get("investment_adjust_speed", 0.65)),
         "asset_multiplier": float(sim_cfg.get("asset_multiplier", 1.5)),
+        "use_dynamic_solver": bool(sim_cfg.get("use_dynamic_solver", False)),
     }
 
 
@@ -47,8 +49,7 @@ def _draw_simulation_shocks(sim: dict) -> dict:
 
     This implements common random numbers (CRN): every time the SMM objective
     is evaluated at a different parameter vector, the model uses the same
-    underlying shock realizations, which makes the objective function much
-    smoother for optimization.
+    underlying shock realizations.
     """
     n_firms = sim["n_firms"]
     total_periods = sim["t_periods"] + sim["burn_in"]
@@ -70,9 +71,6 @@ def _get_or_create_simulation_shocks(config: dict) -> dict:
     """
     Retrieve fixed simulation shocks from config if they already exist.
     Otherwise create them once and store them in config.
-
-    Storing the shocks inside config keeps the architecture simple and ensures
-    that repeated calls during SMM estimation use identical random draws.
     """
     if "_simulation_shocks" not in config:
         sim = _get_simulation_settings(config)
@@ -81,11 +79,36 @@ def _get_or_create_simulation_shocks(config: dict) -> dict:
     return config["_simulation_shocks"]
 
 
+def _get_or_solve_dp(theta, config, fixed_params):
+    """
+    Cache the solved minimal DP model inside config to avoid resolving it
+    repeatedly for the exact same parameter vector within one run.
+    """
+    theta = np.asarray(theta, dtype=float)
+    cache_key = tuple(np.round(theta, 10))
+
+    if "_dp_cache" not in config:
+        config["_dp_cache"] = {}
+
+    if cache_key not in config["_dp_cache"]:
+        config["_dp_cache"][cache_key] = solve_investment_dp(
+            theta=theta,
+            config=config,
+            fixed_params=fixed_params,
+        )
+
+    return config["_dp_cache"][cache_key]
+
+
 def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
     """
-    Simulate a panel of firms from the structural model.
-    """
+    Simulate a panel of firms from the model.
 
+    Transitional design:
+    - investment can come either from the solved dynamic policy (preferred for
+      the new structural stage) or from the legacy policy rule
+    - leverage and cash remain reduced-form placeholders for now
+    """
     theta_named = unpack_theta(theta)
     fixed = get_fixed_params(config)
     sim = _get_simulation_settings(config)
@@ -114,6 +137,11 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
     cash_adjust_speed = sim["cash_adjust_speed"]
     investment_adjust_speed = sim["investment_adjust_speed"]
     asset_multiplier = sim["asset_multiplier"]
+    use_dynamic_solver = sim["use_dynamic_solver"]
+
+    dp_solution = None
+    if use_dynamic_solver:
+        dp_solution = _get_or_solve_dp(theta, config, fixed)
 
     rows = []
 
@@ -122,11 +150,20 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
         k = initial_capital
         log_z = initial_log_z
 
-        # Start each firm near the long-run targets
         z0 = float(np.exp(log_z))
         leverage = float(target_debt_ratio(z=z0, lam=lam))
         cash_ratio = float(target_cash_ratio(z=z0, lam=lam))
-        investment_rate = float(choose_investment_rate(z=z0, psi=psi, lam=lam))
+
+        if use_dynamic_solver:
+            investment_rate = float(
+                interpolate_policy_investment(
+                    k=k,
+                    log_z=log_z,
+                    solution=dp_solution,
+                )
+            )
+        else:
+            investment_rate = float(choose_investment_rate(z=z0, psi=psi, lam=lam))
 
         for t in range(t_periods + burn_in):
             z = float(np.exp(log_z))
@@ -136,19 +173,30 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
             cash_shock = shocks["cash"][firm_index, t]
             productivity_shock = shocks["productivity"][firm_index, t]
 
-            # Persistent investment dynamics
-            i_target = float(choose_investment_rate(z=z, psi=psi, lam=lam))
-            investment_rate = float(
-                np.clip(
-                    (1.0 - investment_adjust_speed) * investment_rate
-                    + investment_adjust_speed * i_target
-                    + sigma_i * investment_shock,
-                    -0.25,
-                    1.00,
+            # Investment dynamics:
+            # if dynamic solver is active, use the solved policy directly;
+            # otherwise use the legacy policy-rule target with smoothing.
+            if use_dynamic_solver:
+                i_target = float(
+                    interpolate_policy_investment(
+                        k=k,
+                        log_z=log_z,
+                        solution=dp_solution,
+                    )
                 )
-            )
+                investment_rate = float(np.clip(i_target, -0.25, 1.00))
+            else:
+                i_target = float(choose_investment_rate(z=z, psi=psi, lam=lam))
+                investment_rate = float(
+                    np.clip(
+                        (1.0 - investment_adjust_speed) * investment_rate
+                        + investment_adjust_speed * i_target
+                        + sigma_i * investment_shock,
+                        -0.25,
+                        1.00,
+                    )
+                )
 
-            # Persistent leverage dynamics
             lev_target = float(target_debt_ratio(z=z, lam=lam))
             leverage = float(
                 np.clip(
@@ -160,7 +208,6 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                 )
             )
 
-            # Persistent cash dynamics
             cash_target = float(target_cash_ratio(z=z, lam=lam))
             cash_ratio = float(
                 np.clip(
@@ -191,18 +238,6 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                 )
             )
 
-            # Measurement layer:
-            # Productive capital in the model is k.
-            # To compare with accounting data, we construct a simple
-            # accounting-style asset measure as:
-            #
-            #     assets = asset_multiplier * k
-            #
-            # Debt and cash are generated from target leverage and cash ratios.
-            # This means leverage and cash ratios are currently policy-rule objects,
-            # not outcomes of a full balance-sheet identity. Making the mapping
-            # explicit prepares the code for future structural extensions where
-            # assets, debt, and cash will evolve endogenously.
             assets = asset_multiplier * k
             debt = leverage * assets
             cash = cash_ratio * assets
@@ -227,12 +262,6 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                 )
             )
 
-            # Observables used for moment matching.
-            # Because debt and cash are generated from target ratios,
-            # these observed ratios are numerically equal to the policy
-            # variables leverage and cash_ratio. Keeping the accounting
-            # mapping explicit helps maintain consistency with the
-            # empirical definitions used in the Compustat data.
             leverage_obs = debt / max(assets, 1e-8)
             cash_ratio_obs = cash / max(assets, 1e-8)
             profitability = operating_profit / max(k, 1e-8)

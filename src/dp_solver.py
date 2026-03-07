@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 
@@ -22,11 +23,18 @@ def get_dp_settings(config: dict) -> dict:
     }
 
 
+def _std_norm_cdf(x):
+    """
+    Standard normal CDF using erf.
+    """
+    return 0.5 * (1.0 + math.erf(x / np.sqrt(2.0)))
+
+
 def tauchen(rho: float, sigma: float, n: int, m: float = 3.0):
     """
     Tauchen discretization for AR(1):
 
-        x' = rho x + sigma * eps,  eps ~ N(0,1)
+        x' = rho x + sigma * eps, eps ~ N(0,1)
 
     Returns
     -------
@@ -63,13 +71,6 @@ def tauchen(rho: float, sigma: float, n: int, m: float = 3.0):
 
     transition = transition / transition.sum(axis=1, keepdims=True)
     return grid, transition
-
-
-def _std_norm_cdf(x):
-    """
-    Standard normal CDF using erf.
-    """
-    return 0.5 * (1.0 + np.math.erf(x / np.sqrt(2.0)))
 
 
 def build_k_grid(config: dict) -> np.ndarray:
@@ -221,39 +222,12 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
     """
     Solve the minimal dynamic investment model with states (k, z)
     and control i using value function iteration.
-
-    Parameters
-    ----------
-    theta : array-like
-        Parameter vector. theta[0] = psi is used here.
-        theta[1] = lambda is ignored at this stage.
-
-    config : dict
-        Project configuration.
-
-    fixed_params : dict
-        Fixed model parameters.
-
-    Returns
-    -------
-    dict containing:
-    - k_grid
-    - log_z_grid
-    - z_grid
-    - z_transition
-    - investment_grid
-    - value_function
-    - policy_investment
-    - converged
-    - n_iter
-    - max_diff
     """
     theta = np.asarray(theta, dtype=float)
     psi = float(theta[0])
 
     dp = get_dp_settings(config)
     beta = dp["beta"]
-    delta = float(fixed_params["delta"])
 
     k_grid = build_k_grid(config)
     log_z_grid, z_grid, z_transition = build_z_process(config, fixed_params)
