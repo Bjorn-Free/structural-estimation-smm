@@ -37,7 +37,9 @@ def _get_simulation_settings(config: dict) -> dict:
         "sigma_cash": float(sim_cfg.get("sigma_cash", 0.05)),
         "debt_adjust_speed": float(sim_cfg.get("debt_adjust_speed", 0.15)),
         "cash_adjust_speed": float(sim_cfg.get("cash_adjust_speed", 0.10)),
-        "investment_adjust_speed": float(sim_cfg.get("investment_adjust_speed", 0.65)),
+        "investment_adjust_speed": float(
+            sim_cfg.get("investment_adjust_speed", 0.65)
+        ),
         "asset_multiplier": float(sim_cfg.get("asset_multiplier", 1.5)),
         "use_dynamic_solver": bool(sim_cfg.get("use_dynamic_solver", False)),
     }
@@ -81,8 +83,8 @@ def _get_or_create_simulation_shocks(config: dict) -> dict:
 
 def _get_or_solve_dp(theta, config, fixed_params):
     """
-    Cache the solved minimal DP model inside config to avoid resolving it
-    repeatedly for the exact same parameter vector within one run.
+    Cache the solved DP model inside config to avoid resolving it repeatedly
+    for the exact same parameter vector within one run.
     """
     theta = np.asarray(theta, dtype=float)
     cache_key = tuple(np.round(theta, 10))
@@ -102,12 +104,13 @@ def _get_or_solve_dp(theta, config, fixed_params):
 
 def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
     """
-    Simulate a panel of firms from the model.
+    Simulate a panel of firms from the current model stage.
 
-    Transitional design:
-    - investment can come either from the solved dynamic policy (preferred for
-      the new structural stage) or from the legacy policy rule
-    - leverage and cash remain reduced-form placeholders for now
+    Current stage:
+    - investment is structural and comes from the solved DP when enabled
+    - capital adjustment costs are active
+    - costly external finance is structural
+    - cash and leverage remain reduced-form placeholders for scaffolding only
     """
     theta_named = unpack_theta(theta)
     fixed = get_fixed_params(config)
@@ -175,9 +178,6 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
             cash_shock = shocks["cash"][firm_index, t]
             productivity_shock = shocks["productivity"][firm_index, t]
 
-            # Investment dynamics:
-            # if dynamic solver is active, use the solved policy directly;
-            # otherwise use the legacy policy-rule target with smoothing.
             if use_dynamic_solver:
                 i_target = float(
                     interpolate_policy_investment(
@@ -223,7 +223,7 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
 
             investment_level = investment_rate * k
 
-            adj_cost = float(
+            adj_cost_value = float(
                 adjustment_cost(
                     k=k,
                     investment_rate=investment_rate,
@@ -242,20 +242,13 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                 )
             )
 
-            assets = asset_multiplier * k
-            debt = leverage * assets
-            cash = cash_ratio * assets
-
-            debt_change = 0.0
-            cash_change = 0.0
-
             ext_fin = float(
                 external_finance_needed(
                     profits=operating_profit,
                     investment=investment_level,
-                    adj_cost=adj_cost,
-                    debt_change=debt_change,
-                    cash_change=cash_change,
+                    adj_cost=adj_cost_value,
+                    debt_change=0.0,
+                    cash_change=0.0,
                 )
             )
 
@@ -265,6 +258,10 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                     lam=lam,
                 )
             )
+
+            assets = asset_multiplier * k
+            debt = leverage * assets
+            cash = cash_ratio * assets
 
             leverage_obs = debt / max(assets, 1e-8)
             cash_ratio_obs = cash / max(assets, 1e-8)
@@ -285,7 +282,7 @@ def simulate_firm_panel(theta, config: dict) -> pd.DataFrame:
                         "debt": debt,
                         "cash": cash,
                         "operating_profit": operating_profit,
-                        "adjustment_cost": adj_cost,
+                        "adjustment_cost": adj_cost_value,
                         "external_finance": ext_fin,
                         "external_finance_cost": ext_fin_cost,
                     }

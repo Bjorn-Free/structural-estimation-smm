@@ -1,5 +1,5 @@
 {
-  "debug_mode": false,
+  "debug_mode": true,
 
   "rebuild_data": false,
   "raw_data_path": "data/raw/compustat_raw.csv",

@@ -14,8 +14,9 @@ def unpack_theta(theta):
     """
     Map estimated parameter vector into named parameters.
 
-    theta[0] = psi  -> convex adjustment cost
-    theta[1] = lam  -> proportional external finance cost
+    Current stage:
+    - theta[0] = psi  -> convex capital adjustment cost
+    - theta[1] = lam  -> proportional costly external finance
     """
     psi = float(theta[0])
     lam = float(theta[1])
@@ -26,25 +27,17 @@ def get_fixed_params(config=None):
     """
     Fixed model parameters shared across simulation and the DP solver.
 
-    Minimal canonical structure for the current stage:
-    - concave operating profits
-    - fixed operating cost
-    - capital accumulation
-    - AR(1) productivity
-    - no structural debt/cash state yet
+    Current structural stage:
+    - Section 3.1 backbone with capital and productivity
+    - plus convex capital adjustment costs
+    - plus costly external finance
+    - no structural cash yet
 
     Operating profits are:
 
         profit(k, z) = production_scale * z * k^alpha
                        + profit_intercept * k
                        - fixed_cost
-
-    Notes
-    -----
-    - alpha < 1 gives diminishing returns to capital
-    - fixed_cost discourages collapse to arbitrarily small firms
-    - profit_intercept is left available, but defaults to zero in the current
-      cleaner Section 3.1-style backbone
     """
     model_cfg = {}
     if config is not None:
@@ -77,19 +70,6 @@ def profit_rate(
 ):
     """
     Profitability rate per unit of capital.
-
-    If operating profits are:
-
-        profit(k, z) = production_scale * z * k^alpha
-                       + profit_intercept * k
-                       - fixed_cost
-
-    then:
-
-        profit_rate(k, z)
-            = production_scale * z * k^(alpha - 1)
-              + profit_intercept
-              - fixed_cost / k
     """
     k = np.maximum(np.asarray(k, dtype=float), 1e-8)
     z = np.maximum(np.asarray(z, dtype=float), 1e-8)
@@ -128,7 +108,7 @@ def profit(
 
 def adjustment_cost(k, investment_rate, psi):
     """
-    Convex adjustment cost:
+    Convex capital adjustment cost:
 
         AC = 0.5 * psi * i^2 * k
     """
@@ -155,16 +135,24 @@ def net_investment(k, kprime, delta):
     Net investment expenditure implied by choosing next-period capital:
 
         x = k' - (1 - delta) * k
-
-    Notes
-    -----
-    - x > 0 means the firm is investing
-    - x < 0 means the firm is disinvesting / shrinking capital
     """
     k = np.maximum(np.asarray(k, dtype=float), 1e-8)
     kprime = np.maximum(np.asarray(kprime, dtype=float), 1e-8)
 
     return kprime - (1.0 - delta) * k
+
+
+def period_payoff_adjustment_model(profits, investment, adj_cost):
+    """
+    One-period payoff for the model with capital adjustment costs only:
+
+        payoff = profits - net_investment - adjustment_cost
+    """
+    profits = np.asarray(profits, dtype=float)
+    investment = np.asarray(investment, dtype=float)
+    adj_cost = np.asarray(adj_cost, dtype=float)
+
+    return profits - investment - adj_cost
 
 
 def external_finance_needed(
@@ -175,16 +163,12 @@ def external_finance_needed(
     cash_change=0.0,
 ):
     """
-    Positive funding gap.
-
-    In the current minimal model without structural debt/cash states,
-    this is the amount of external funds required when internal funds
-    are insufficient to cover uses.
+    Positive funding gap:
 
         gap = investment + adjustment_cost + cash_change
               - profits - debt_change
 
-    and external finance is max(gap, 0).
+        ext_finance = max(gap, 0)
     """
     gap = investment + adj_cost + cash_change - profits - debt_change
     return np.maximum(gap, 0.0)
@@ -206,9 +190,7 @@ def payout(
     cash_change=0.0,
 ):
     """
-    Net payout after real-side uses and external finance costs.
-
-    Current minimal sources-and-uses logic:
+    Net payout after real-side uses and external finance costs:
 
         ext_finance = max(investment + adj_cost + cash_change
                           - profits - debt_change, 0)
@@ -220,8 +202,9 @@ def payout(
                  + debt_change
                  - lam * ext_finance
 
-    This is the object the current DP maximizes period by period
-    before adding continuation value.
+    In the current stage:
+    - debt_change = 0
+    - cash_change = 0
     """
     ext_finance = external_finance_needed(
         profits=profits,
@@ -231,7 +214,7 @@ def payout(
         cash_change=cash_change,
     )
 
-    ext_finance_cost = external_finance_cost(ext_finance, lam)
+    ext_finance_cost_value = external_finance_cost(ext_finance, lam)
 
     return (
         profits
@@ -239,7 +222,25 @@ def payout(
         - adj_cost
         - cash_change
         + debt_change
-        - ext_finance_cost
+        - ext_finance_cost_value
+    )
+
+
+def period_payoff_financing_model(profits, investment, adj_cost, lam):
+    """
+    One-period payoff for the current model stage:
+
+        payoff = profits - investment - adjustment_cost - external_finance_cost
+
+    where external finance is raised only when internal funds are insufficient.
+    """
+    return payout(
+        profits=profits,
+        investment=investment,
+        adj_cost=adj_cost,
+        lam=lam,
+        debt_change=0.0,
+        cash_change=0.0,
     )
 
 
@@ -293,9 +294,8 @@ def target_debt_ratio(
     """
     Reduced-form placeholder leverage rule.
 
-    Debt is not yet a structural state/control in the current minimal model.
-    This remains available for scaffolding until the state space expands to
-    include debt explicitly.
+    Debt is not structural at the current stage and is retained only to
+    preserve the broader simulation/reporting scaffolding.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
 
@@ -318,9 +318,8 @@ def target_cash_ratio(
     """
     Reduced-form placeholder cash rule.
 
-    Cash is not yet a structural state/control in the current minimal model.
-    This remains available for scaffolding until the state space expands to
-    include cash explicitly.
+    Cash is not structural at the current stage and is retained only to
+    preserve the broader simulation/reporting scaffolding.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
 
