@@ -1,6 +1,8 @@
 import math
 import numpy as np
 
+from src.model import profit, adjustment_cost
+
 
 def get_dp_settings(config: dict) -> dict:
     """
@@ -10,16 +12,22 @@ def get_dp_settings(config: dict) -> dict:
 
     return {
         "beta": float(dp_cfg.get("beta", 0.95)),
-        "k_grid_size": int(dp_cfg.get("k_grid_size", 25)),
-        "k_min": float(dp_cfg.get("k_min", 20.0)),
-        "k_max": float(dp_cfg.get("k_max", 250.0)),
+        "k_grid_size": int(dp_cfg.get("k_grid_size", 41)),
+        "k_min": float(dp_cfg.get("k_min", 10.0)),
+        "k_max": float(dp_cfg.get("k_max", 300.0)),
         "z_grid_size": int(dp_cfg.get("z_grid_size", 7)),
-        "tauchen_m": float(dp_cfg.get("tauchen_m", 3.0)),
-        "control_grid_size": int(dp_cfg.get("control_grid_size", 41)),
-        "investment_min": float(dp_cfg.get("investment_min", -0.20)),
-        "investment_max": float(dp_cfg.get("investment_max", 0.80)),
+        "tauchen_m": float(dp_cfg.get("tauchen_m", 2.5)),
+        "control_grid_size": int(dp_cfg.get("control_grid_size", 181)),
+        "investment_min": float(dp_cfg.get("investment_min", -0.35)),
+        "investment_max": float(dp_cfg.get("investment_max", 0.50)),
         "max_iter": int(dp_cfg.get("max_iter", 500)),
         "tol": float(dp_cfg.get("tol", 1e-6)),
+        "policy_lower_bound_tolerance": float(
+            dp_cfg.get("policy_lower_bound_tolerance", 1e-8)
+        ),
+        "policy_upper_bound_tolerance": float(
+            dp_cfg.get("policy_upper_bound_tolerance", 1e-8)
+        ),
     }
 
 
@@ -76,22 +84,54 @@ def tauchen(rho: float, sigma: float, n: int, m: float = 3.0):
 def build_k_grid(config: dict) -> np.ndarray:
     """
     Capital grid.
+
+    We now use a log-spaced grid so the solver has better resolution in the
+    low-capital region, where the current model's economics are especially
+    important for determining whether the policy collapses to the floor.
     """
     dp = get_dp_settings(config)
-    grid = np.linspace(dp["k_min"], dp["k_max"], dp["k_grid_size"])
+
+    k_min = float(dp["k_min"])
+    k_max = float(dp["k_max"])
+    n = int(dp["k_grid_size"])
+
+    grid = np.exp(np.linspace(np.log(k_min), np.log(k_max), n))
     return grid.astype(float)
 
 
-def build_investment_grid(config: dict) -> np.ndarray:
+def build_kprime_grid(config: dict, current_k: float, delta: float) -> np.ndarray:
     """
-    Control grid for the investment rate i.
+    Control grid for next-period capital k'.
+
+    We construct this from the allowed investment-rate bounds:
+        k' = (1 - delta + i) * k
+
+    The feasible k' set is intersected with the support of the k-grid itself.
     """
     dp = get_dp_settings(config)
-    grid = np.linspace(
-        dp["investment_min"],
-        dp["investment_max"],
-        dp["control_grid_size"],
+
+    i_min = float(dp["investment_min"])
+    i_max = float(dp["investment_max"])
+    k_min = float(dp["k_min"])
+    k_max = float(dp["k_max"])
+    n = int(dp["control_grid_size"])
+
+    implied_kprime_min = max((1.0 - delta + i_min) * current_k, 1e-8)
+    implied_kprime_max = max(
+        (1.0 - delta + i_max) * current_k,
+        implied_kprime_min + 1e-8,
     )
+
+    kprime_min = max(implied_kprime_min, k_min)
+    kprime_max = min(implied_kprime_max, k_max)
+
+    if kprime_max <= kprime_min:
+        kprime_max = kprime_min + 1e-8
+
+    if kprime_min <= 0.0:
+        kprime_min = 1e-8
+
+    grid = np.exp(np.linspace(np.log(kprime_min), np.log(kprime_max), n))
     return grid.astype(float)
 
 
@@ -114,70 +154,60 @@ def build_z_process(config: dict, fixed_params: dict):
     return log_z_grid.astype(float), z_grid.astype(float), transition.astype(float)
 
 
-def profit_rate(z, alpha, profit_intercept):
+def investment_rate_from_kprime(k: float, kprime: float, delta: float) -> float:
     """
-    Profitability rate per unit of capital.
+    Recover the investment rate implied by choosing next-period capital:
+
+        i = k'/k - (1 - delta)
     """
-    z = np.maximum(z, 1e-8)
-    return profit_intercept + (z ** alpha) - 1.0
+    k = max(float(k), 1e-8)
+    kprime = max(float(kprime), 1e-8)
+    return float((kprime / k) - (1.0 - delta))
 
 
-def operating_profit(k, z, alpha, profit_intercept):
+def one_period_payoff_from_kprime(k, z, kprime, psi, fixed_params):
     """
-    Operating profit level.
-    """
-    k = np.maximum(k, 1e-8)
-    return k * profit_rate(z, alpha, profit_intercept)
-
-
-def adjustment_cost(k, investment_rate, psi):
-    """
-    Convex adjustment cost:
-        AC = 0.5 * psi * i^2 * k
-    """
-    return 0.5 * psi * (investment_rate ** 2) * k
-
-
-def next_capital(k, investment_rate, delta):
-    """
-    Law of motion for capital:
-        k' = (1 - delta + i) * k
-    """
-    return (1.0 - delta + investment_rate) * k
-
-
-def one_period_payoff(k, z, investment_rate, psi, fixed_params):
-    """
-    One-period payoff for the minimal (k,z) investment model.
+    One-period payoff for the minimal (k, z) investment model when the control
+    is next-period capital k'.
 
     Current simplified objective:
         payoff = operating profit - investment expenditure - adjustment cost
 
-    This is the correct minimal starting point for debugging the dynamic solver.
-    External finance, debt, and cash will be added in later stages.
+    with investment implied by:
+        i = k'/k - (1 - delta)
+
+    Economic interpretation of the current version:
+    - profits are concave in capital
+    - there is a fixed operating cost
+    - this should make very small firms unattractive and help create an
+      interior capital target
     """
     alpha = float(fixed_params["alpha"])
     delta = float(fixed_params["delta"])
     profit_intercept = float(fixed_params["profit_intercept"])
+    production_scale = float(fixed_params["production_scale"])
+    fixed_cost = float(fixed_params["fixed_cost"])
 
-    prof = operating_profit(
+    i_rate = investment_rate_from_kprime(k=k, kprime=kprime, delta=delta)
+
+    prof = profit(
         k=k,
         z=z,
         alpha=alpha,
         profit_intercept=profit_intercept,
+        production_scale=production_scale,
+        fixed_cost=fixed_cost,
     )
 
-    investment_expenditure = investment_rate * k
+    investment_expenditure = i_rate * max(float(k), 1e-8)
     adj_cost = adjustment_cost(
         k=k,
-        investment_rate=investment_rate,
+        investment_rate=i_rate,
         psi=psi,
     )
 
     payoff = prof - investment_expenditure - adj_cost
-    k_next = next_capital(k, investment_rate, delta)
-
-    return float(payoff), float(k_next)
+    return float(payoff), float(i_rate)
 
 
 def linear_interp_1d(x_grid: np.ndarray, y_values: np.ndarray, x: float) -> float:
@@ -218,25 +248,78 @@ def expected_continuation_value(k_next, iz, V, k_grid, z_transition):
     return float(expected_value)
 
 
+def compute_policy_bound_shares(policy_i: np.ndarray, config: dict) -> dict:
+    """
+    Compute the fraction of policy points at or extremely near the lower
+    and upper investment bounds.
+    """
+    dp = get_dp_settings(config)
+    i_min = float(dp["investment_min"])
+    i_max = float(dp["investment_max"])
+    tol_low = float(dp["policy_lower_bound_tolerance"])
+    tol_high = float(dp["policy_upper_bound_tolerance"])
+
+    lower_hits = np.isclose(policy_i, i_min, atol=tol_low)
+    upper_hits = np.isclose(policy_i, i_max, atol=tol_high)
+
+    return {
+        "share_lower_bound": float(np.mean(lower_hits)),
+        "share_upper_bound": float(np.mean(upper_hits)),
+        "share_any_bound": float(np.mean(lower_hits | upper_hits)),
+        "share_interior": float(np.mean(~(lower_hits | upper_hits))),
+    }
+
+
 def solve_investment_dp(theta, config: dict, fixed_params: dict):
     """
     Solve the minimal dynamic investment model with states (k, z)
-    and control i using value function iteration.
+    and control k' using value function iteration.
+
+    Parameters
+    ----------
+    theta : array-like
+        Parameter vector. theta[0] = psi is used here.
+        theta[1] = lambda is ignored at this stage.
+
+    config : dict
+        Project configuration.
+
+    fixed_params : dict
+        Fixed model parameters.
+
+    Returns
+    -------
+    dict containing:
+    - k_grid
+    - log_z_grid
+    - z_grid
+    - z_transition
+    - value_function
+    - policy_kprime
+    - policy_investment
+    - converged
+    - n_iter
+    - max_diff
+    - share_lower_bound
+    - share_upper_bound
+    - share_any_bound
+    - share_interior
     """
     theta = np.asarray(theta, dtype=float)
     psi = float(theta[0])
 
     dp = get_dp_settings(config)
-    beta = dp["beta"]
+    beta = float(dp["beta"])
+    delta = float(fixed_params["delta"])
 
     k_grid = build_k_grid(config)
     log_z_grid, z_grid, z_transition = build_z_process(config, fixed_params)
-    investment_grid = build_investment_grid(config)
 
     nk = len(k_grid)
     nz = len(z_grid)
 
     V = np.zeros((nk, nz), dtype=float)
+    policy_kprime = np.zeros((nk, nz), dtype=float)
     policy_i = np.zeros((nk, nz), dtype=float)
 
     converged = False
@@ -246,24 +329,32 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
         V_new = np.zeros_like(V)
 
         for ik, k in enumerate(k_grid):
+            kprime_grid = build_kprime_grid(
+                config=config,
+                current_k=k,
+                delta=delta,
+            )
+
             for iz, z in enumerate(z_grid):
                 best_value = -np.inf
-                best_i = investment_grid[0]
+                best_kprime = kprime_grid[0]
+                best_i = investment_rate_from_kprime(
+                    k=k,
+                    kprime=kprime_grid[0],
+                    delta=delta,
+                )
 
-                for investment_rate in investment_grid:
-                    payoff, k_next = one_period_payoff(
+                for kprime in kprime_grid:
+                    payoff, i_rate = one_period_payoff_from_kprime(
                         k=k,
                         z=z,
-                        investment_rate=investment_rate,
+                        kprime=kprime,
                         psi=psi,
                         fixed_params=fixed_params,
                     )
 
-                    if k_next <= 1e-8:
-                        continue
-
                     continuation = expected_continuation_value(
-                        k_next=k_next,
+                        k_next=kprime,
                         iz=iz,
                         V=V,
                         k_grid=k_grid,
@@ -274,9 +365,11 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
 
                     if candidate_value > best_value:
                         best_value = candidate_value
-                        best_i = investment_rate
+                        best_kprime = kprime
+                        best_i = i_rate
 
                 V_new[ik, iz] = best_value
+                policy_kprime[ik, iz] = best_kprime
                 policy_i[ik, iz] = best_i
 
         max_diff = float(np.max(np.abs(V_new - V)))
@@ -286,17 +379,23 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
             converged = True
             break
 
+    bound_stats = compute_policy_bound_shares(policy_i=policy_i, config=config)
+
     return {
         "k_grid": k_grid,
         "log_z_grid": log_z_grid,
         "z_grid": z_grid,
         "z_transition": z_transition,
-        "investment_grid": investment_grid,
         "value_function": V,
+        "policy_kprime": policy_kprime,
         "policy_investment": policy_i,
         "converged": converged,
         "n_iter": it + 1,
         "max_diff": max_diff,
+        "share_lower_bound": bound_stats["share_lower_bound"],
+        "share_upper_bound": bound_stats["share_upper_bound"],
+        "share_any_bound": bound_stats["share_any_bound"],
+        "share_interior": bound_stats["share_interior"],
     }
 
 

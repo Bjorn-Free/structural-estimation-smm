@@ -18,6 +18,7 @@ def build_policy_summary_table(solution, psi_value):
     k_grid = solution["k_grid"]
     z_grid = solution["z_grid"]
     policy_i = solution["policy_investment"]
+    policy_kprime = solution["policy_kprime"]
 
     k_indices = [0, len(k_grid) // 2, len(k_grid) - 1]
     z_indices = [0, len(z_grid) // 2, len(z_grid) - 1]
@@ -33,8 +34,32 @@ def build_policy_summary_table(solution, psi_value):
                     "k": float(k_grid[ik]),
                     "z": float(z_grid[iz]),
                     "investment_policy": float(policy_i[ik, iz]),
+                    "kprime_policy": float(policy_kprime[ik, iz]),
                 }
             )
+
+    return pd.DataFrame(rows)
+
+
+def build_solver_summary_table(scenario_results):
+    """
+    Compact table of solver diagnostics across validation scenarios.
+    """
+    rows = []
+    for result in scenario_results:
+        sol = result["solution"]
+        rows.append(
+            {
+                "scenario": result["label"],
+                "psi": float(result["psi"]),
+                "converged": bool(sol["converged"]),
+                "iterations": int(sol["n_iter"]),
+                "bellman_sup_norm": float(sol["max_diff"]),
+                "share_lower_bound": float(sol["share_lower_bound"]),
+                "share_upper_bound": float(sol["share_upper_bound"]),
+                "share_any_bound": float(sol["share_any_bound"]),
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -125,7 +150,9 @@ def main():
             )
         )
 
+    solver_summary_df = build_solver_summary_table(scenario_results)
     policy_summary_df = pd.concat(policy_tables, axis=0, ignore_index=True)
+
     moment_validation_df = build_moment_comparison_table(
         labels=labels,
         m_data=m_data,
@@ -146,7 +173,13 @@ def main():
         print("Solver converged:", solution["converged"])
         print("Iterations:", solution["n_iter"])
         print("Final Bellman sup norm:", solution["max_diff"])
+        print("Share lower bound:", solution["share_lower_bound"])
+        print("Share upper bound:", solution["share_upper_bound"])
+        print("Share any bound:", solution["share_any_bound"])
         print("Simulated moments:", result["m_sim"])
+
+    print("\nSolver summary table:")
+    print(solver_summary_df.to_string(index=False))
 
     print("\nPolicy function summary table:")
     print(policy_summary_df.to_string(index=False))
