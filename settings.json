@@ -1,27 +1,39 @@
 {
   "debug_mode": true,
+  "validation_mode": "medium",
 
   "rebuild_data": false,
   "raw_data_path": "data/raw/compustat_raw.csv",
   "clean_data_path": "data/clean/compustat_clean.csv",
 
-  "theta0": [0.1, 0.1],
+  "theta0": [0.15, 6.0],
 
   "bounds": [
     [0.0001, 10.0],
     [0.0001, 10.0]
   ],
 
-  "n_moments": 12,
+  "smm_optimizer_method": "Nelder-Mead",
+
+  "smm_optimizer_options": {
+    "maxiter": 80,
+    "maxfev": 160,
+    "xatol": 0.001,
+    "fatol": 0.001,
+    "adaptive": true
+  },
+
+  "n_moments": 9,
 
   "model": {
     "alpha": 0.75,
     "delta": 0.15,
-    "rho": 0.70,
+    "rho": 0.90,
     "sigma": 0.40,
     "profit_intercept": 0.00,
     "production_scale": 0.60,
-    "fixed_cost": 12.0
+    "fixed_cost": 12.0,
+    "cash_return_rate": 0.02
   },
 
   "simulation": {
@@ -31,6 +43,7 @@
     "seed": 123,
 
     "initial_capital": 100.0,
+    "initial_cash_ratio": 0.10,
     "initial_log_z": 0.0,
     "start_year": 2000,
 
@@ -53,10 +66,16 @@
     "k_min": 10.0,
     "k_max": 300.0,
 
+    "p_grid_size": 25,
+    "p_min": 0.0,
+    "p_max": 60.0,
+
     "z_grid_size": 7,
     "tauchen_m": 2.5,
 
     "control_grid_size": 181,
+    "cash_control_grid_size": 21,
+
     "investment_min": -0.35,
     "investment_max": 0.50,
 
@@ -65,5 +84,38 @@
 
     "policy_lower_bound_tolerance": 1e-8,
     "policy_upper_bound_tolerance": 1e-8
+  },
+
+  "debug_overrides": {
+    "fast": {
+      "simulation": {
+        "n_firms": 250,
+        "t_periods": 25,
+        "burn_in": 5
+      },
+      "dp": {
+        "k_grid_size": 15,
+        "p_grid_size": 5,
+        "z_grid_size": 5,
+        "control_grid_size": 25,
+        "cash_control_grid_size": 5,
+        "max_iter": 100
+      }
+    },
+    "medium": {
+      "simulation": {
+        "n_firms": 500,
+        "t_periods": 30,
+        "burn_in": 5
+      },
+      "dp": {
+        "k_grid_size": 15,
+        "p_grid_size": 7,
+        "z_grid_size": 5,
+        "control_grid_size": 25,
+        "cash_control_grid_size": 7,
+        "max_iter": 400
+      }
+    }
   }
 }

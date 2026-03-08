@@ -1,41 +1,65 @@
+import copy
 import math
+
 import numpy as np
 
 from src.model import (
     profit,
     adjustment_cost,
     net_investment,
-    external_finance_needed,
+    external_finance_needed_with_cash,
     external_finance_cost,
-    period_payoff_financing_model,
+    period_payoff_cash_model,
 )
+
+
+def _apply_debug_overrides(config: dict, block_name: str, base_cfg: dict) -> dict:
+    """
+    Apply validation-mode-specific debug overrides to a config block.
+
+    Expected structure in settings.json:
+        config["debug_overrides"][validation_mode][block_name]
+
+    If debug_mode is False, no overrides are applied.
+    """
+    out = copy.deepcopy(base_cfg)
+
+    if not bool(config.get("debug_mode", False)):
+        return out
+
+    validation_mode = config.get("validation_mode", "fast")
+    debug_overrides = config.get("debug_overrides", {})
+    mode_overrides = debug_overrides.get(validation_mode, {})
+
+    block_overrides = mode_overrides.get(block_name, {})
+    if isinstance(block_overrides, dict):
+        out.update(block_overrides)
+
+    return out
 
 
 def get_dp_settings(config: dict) -> dict:
     """
     Read dynamic-programming settings from config.
+
+    If debug_mode is active, apply the selected validation_mode override from:
+        config["debug_overrides"][validation_mode]["dp"]
     """
-    dp_cfg = config.get("dp", {}).copy()
-
-    # --------------------------------------------------
-    # DEBUG MODE SPEED REDUCTION
-    # --------------------------------------------------
-    debug = config.get("debug_mode", False)
-
-    if debug:
-        dp_cfg["k_grid_size"] = min(dp_cfg.get("k_grid_size", 41), 15)
-        dp_cfg["z_grid_size"] = min(dp_cfg.get("z_grid_size", 7), 5)
-        dp_cfg["control_grid_size"] = min(dp_cfg.get("control_grid_size", 181), 41)
-        dp_cfg["max_iter"] = min(dp_cfg.get("max_iter", 500), 200)
+    dp_cfg = copy.deepcopy(config.get("dp", {}))
+    dp_cfg = _apply_debug_overrides(config, "dp", dp_cfg)
 
     return {
         "beta": float(dp_cfg.get("beta", 0.95)),
         "k_grid_size": int(dp_cfg.get("k_grid_size", 41)),
         "k_min": float(dp_cfg.get("k_min", 10.0)),
         "k_max": float(dp_cfg.get("k_max", 300.0)),
+        "p_grid_size": int(dp_cfg.get("p_grid_size", 25)),
+        "p_min": float(dp_cfg.get("p_min", 0.0)),
+        "p_max": float(dp_cfg.get("p_max", 60.0)),
         "z_grid_size": int(dp_cfg.get("z_grid_size", 7)),
         "tauchen_m": float(dp_cfg.get("tauchen_m", 2.5)),
         "control_grid_size": int(dp_cfg.get("control_grid_size", 181)),
+        "cash_control_grid_size": int(dp_cfg.get("cash_control_grid_size", 21)),
         "investment_min": float(dp_cfg.get("investment_min", -0.35)),
         "investment_max": float(dp_cfg.get("investment_max", 0.50)),
         "max_iter": int(dp_cfg.get("max_iter", 500)),
@@ -65,7 +89,7 @@ def tauchen(rho: float, sigma: float, n: int, m: float = 3.0):
     if n < 2:
         raise ValueError("Tauchen discretization requires n >= 2.")
 
-    sigma_x = sigma / np.sqrt(1.0 - rho ** 2)
+    sigma_x = sigma / np.sqrt(1.0 - rho**2)
     x_max = m * sigma_x
     x_min = -x_max
 
@@ -105,6 +129,31 @@ def build_k_grid(config: dict) -> np.ndarray:
     return grid.astype(float)
 
 
+def _dense_linear_grid(x_min: float, x_max: float, n: int) -> np.ndarray:
+    """
+    Dense-near-zero linearized grid using a squared spacing transform.
+    """
+    u = np.linspace(0.0, 1.0, n)
+    grid = x_min + (x_max - x_min) * (u**2)
+    return grid.astype(float)
+
+
+def build_p_grid(config: dict) -> np.ndarray:
+    """
+    Cash grid.
+
+    We use a grid denser near zero because the economically relevant region for
+    the cash choice is often concentrated near low cash balances.
+    """
+    dp = get_dp_settings(config)
+
+    p_min = float(dp["p_min"])
+    p_max = float(dp["p_max"])
+    n = int(dp["p_grid_size"])
+
+    return _dense_linear_grid(p_min, p_max, n)
+
+
 def build_kprime_grid(config: dict, current_k: float, delta: float) -> np.ndarray:
     """
     Control grid for next-period capital k'.
@@ -134,6 +183,23 @@ def build_kprime_grid(config: dict, current_k: float, delta: float) -> np.ndarra
 
     grid = np.exp(np.linspace(np.log(kprime_min), np.log(kprime_max), n))
     return grid.astype(float)
+
+
+def build_pprime_grid(config: dict, current_p: float) -> np.ndarray:
+    """
+    Control grid for next-period cash p'.
+
+    We keep p' within the global support but concentrate resolution near zero
+    and around the current cash state.
+    """
+    dp = get_dp_settings(config)
+
+    p_min = float(dp["p_min"])
+    p_max = float(dp["p_max"])
+    n = int(dp["cash_control_grid_size"])
+
+    upper = min(max(2.0 * current_p + 10.0, p_min + 1.0), p_max)
+    return _dense_linear_grid(p_min, upper, n)
 
 
 def build_z_process(config: dict, fixed_params: dict):
@@ -168,18 +234,18 @@ def investment_rate_from_kprime(k: float, kprime: float, delta: float):
     return float((kprime / k) - (1.0 - delta))
 
 
-def one_period_payoff_from_kprime(k, z, kprime, theta, fixed_params):
+def one_period_payoff_from_controls(k, p, z, kprime, pprime, theta, fixed_params):
     """
-    One-period payoff for the current model stage:
+    One-period payoff for the repaired structural cash model.
 
-        payoff = profits - net investment - adjustment cost - ext finance cost
+    State:
+        (k, p, z)
 
-    where:
-        ext_finance = max(investment + adjustment cost - profits, 0)
+    Controls:
+        (k', p')
 
-    Current structural frictions:
-    - psi: adjustment costs
-    - lambda: costly external finance
+    Payoff is evaluated using the shared model primitives so the solver and
+    simulator are guaranteed to use the same timing conventions.
     """
     theta = np.asarray(theta, dtype=float)
     psi = float(theta[0])
@@ -190,6 +256,7 @@ def one_period_payoff_from_kprime(k, z, kprime, theta, fixed_params):
     profit_intercept = float(fixed_params["profit_intercept"])
     production_scale = float(fixed_params["production_scale"])
     fixed_cost = float(fixed_params["fixed_cost"])
+    cash_return_rate = float(fixed_params["cash_return_rate"])
 
     i_rate = investment_rate_from_kprime(k=k, kprime=kprime, delta=delta)
 
@@ -214,12 +281,13 @@ def one_period_payoff_from_kprime(k, z, kprime, theta, fixed_params):
         psi=psi,
     )
 
-    ext_finance = external_finance_needed(
+    ext_finance = external_finance_needed_with_cash(
         profits=prof,
+        current_cash=p,
+        next_cash=pprime,
         investment=investment_expenditure,
         adj_cost=adj_cost_value,
-        debt_change=0.0,
-        cash_change=0.0,
+        cash_return_rate=cash_return_rate,
     )
 
     ext_finance_cost_value = external_finance_cost(
@@ -227,11 +295,14 @@ def one_period_payoff_from_kprime(k, z, kprime, theta, fixed_params):
         lam=lam,
     )
 
-    payoff = period_payoff_financing_model(
+    payoff = period_payoff_cash_model(
         profits=prof,
+        current_cash=p,
+        next_cash=pprime,
         investment=investment_expenditure,
         adj_cost=adj_cost_value,
         lam=lam,
+        cash_return_rate=cash_return_rate,
     )
 
     return {
@@ -242,6 +313,7 @@ def one_period_payoff_from_kprime(k, z, kprime, theta, fixed_params):
         "adjustment_cost": float(adj_cost_value),
         "external_finance": float(ext_finance),
         "external_finance_cost": float(ext_finance_cost_value),
+        "cash_next": float(pprime),
     }
 
 
@@ -269,24 +341,84 @@ def linear_interp_1d(x_grid: np.ndarray, y_values: np.ndarray, x: float):
     return float((1.0 - weight) * y0 + weight * y1)
 
 
-def expected_continuation_value(k_next, iz, V, k_grid, z_transition):
+def bilinear_interp_2d(x_grid, y_grid, values, x, y):
     """
-    Compute E[V(k', z') | current z-index = iz].
+    Bilinear interpolation on a rectangular grid with flat extrapolation.
+
+    values must have shape (len(x_grid), len(y_grid)).
     """
-    probs = z_transition[iz]
-    expected_value = 0.0
+    x = float(x)
+    y = float(y)
 
-    for iz_next in range(len(probs)):
-        V_next_z = V[:, iz_next]
-        cont_value = linear_interp_1d(k_grid, V_next_z, k_next)
-        expected_value += probs[iz_next] * cont_value
+    x = min(max(x, x_grid[0]), x_grid[-1])
+    y = min(max(y, y_grid[0]), y_grid[-1])
 
-    return float(expected_value)
+    ix = np.searchsorted(x_grid, x) - 1
+    iy = np.searchsorted(y_grid, y) - 1
+
+    ix = max(0, min(ix, len(x_grid) - 2))
+    iy = max(0, min(iy, len(y_grid) - 2))
+
+    x0 = x_grid[ix]
+    x1 = x_grid[ix + 1]
+    y0 = y_grid[iy]
+    y1 = y_grid[iy + 1]
+
+    q00 = values[ix, iy]
+    q01 = values[ix, iy + 1]
+    q10 = values[ix + 1, iy]
+    q11 = values[ix + 1, iy + 1]
+
+    wx = 0.0 if x1 == x0 else (x - x0) / (x1 - x0)
+    wy = 0.0 if y1 == y0 else (y - y0) / (y1 - y0)
+
+    val0 = (1.0 - wx) * q00 + wx * q10
+    val1 = (1.0 - wx) * q01 + wx * q11
+
+    return float((1.0 - wy) * val0 + wy * val1)
+
+
+def _bilinear_interp_2d_vectorized(x_grid, y_grid, values, x_points, y_points):
+    """
+    Vectorized bilinear interpolation on a rectangular grid.
+    """
+    x_points = np.asarray(x_points, dtype=float)
+    y_points = np.asarray(y_points, dtype=float)
+
+    x = np.clip(x_points, x_grid[0], x_grid[-1])
+    y = np.clip(y_points, y_grid[0], y_grid[-1])
+
+    ix = np.searchsorted(x_grid, x, side="right") - 1
+    iy = np.searchsorted(y_grid, y, side="right") - 1
+
+    ix = np.clip(ix, 0, len(x_grid) - 2)
+    iy = np.clip(iy, 0, len(y_grid) - 2)
+
+    x0 = x_grid[ix]
+    x1 = x_grid[ix + 1]
+    y0 = y_grid[iy]
+    y1 = y_grid[iy + 1]
+
+    q00 = values[ix, iy]
+    q01 = values[ix, iy + 1]
+    q10 = values[ix + 1, iy]
+    q11 = values[ix + 1, iy + 1]
+
+    denom_x = np.where(np.abs(x1 - x0) < 1e-14, 1.0, x1 - x0)
+    denom_y = np.where(np.abs(y1 - y0) < 1e-14, 1.0, y1 - y0)
+
+    wx = (x - x0) / denom_x
+    wy = (y - y0) / denom_y
+
+    val0 = (1.0 - wx) * q00 + wx * q10
+    val1 = (1.0 - wx) * q01 + wx * q11
+
+    return (1.0 - wy) * val0 + wy * val1
 
 
 def compute_policy_bound_shares(policy_i: np.ndarray, config: dict):
     """
-    Compute fraction of policy points at or near the lower/upper bounds.
+    Compute fraction of investment policy points at or near the lower/upper bounds.
     """
     dp = get_dp_settings(config)
 
@@ -309,15 +441,16 @@ def compute_policy_bound_shares(policy_i: np.ndarray, config: dict):
 
 def solve_investment_dp(theta, config: dict, fixed_params: dict):
     """
-    Solve the investment model with:
+    Solve the repaired structural cash model with:
     - convex capital adjustment costs
     - costly external finance
+    - cash as a structural state/control
 
     Current state:
-        (k, z)
+        (k, p, z)
 
-    Current control:
-        k'  (equivalently investment)
+    Current controls:
+        (k', p')
     """
     theta = np.asarray(theta, dtype=float)
 
@@ -327,26 +460,43 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
     delta = float(fixed_params["delta"])
 
     k_grid = build_k_grid(config)
+    p_grid = build_p_grid(config)
     log_z_grid, z_grid, z_transition = build_z_process(config, fixed_params)
 
     nk = len(k_grid)
+    np_grid = len(p_grid)
     nz = len(z_grid)
 
-    V = np.zeros((nk, nz), dtype=float)
+    V = np.zeros((nk, np_grid, nz), dtype=float)
 
-    policy_kprime = np.zeros((nk, nz), dtype=float)
-    policy_i = np.zeros((nk, nz), dtype=float)
-    policy_profit = np.zeros((nk, nz), dtype=float)
-    policy_investment_expenditure = np.zeros((nk, nz), dtype=float)
-    policy_adjustment_cost = np.zeros((nk, nz), dtype=float)
-    policy_external_finance = np.zeros((nk, nz), dtype=float)
-    policy_external_finance_cost = np.zeros((nk, nz), dtype=float)
+    policy_kprime = np.zeros((nk, np_grid, nz), dtype=float)
+    policy_pprime = np.zeros((nk, np_grid, nz), dtype=float)
+    policy_i = np.zeros((nk, np_grid, nz), dtype=float)
+    policy_profit = np.zeros((nk, np_grid, nz), dtype=float)
+    policy_investment_expenditure = np.zeros((nk, np_grid, nz), dtype=float)
+    policy_adjustment_cost = np.zeros((nk, np_grid, nz), dtype=float)
+    policy_external_finance = np.zeros((nk, np_grid, nz), dtype=float)
+    policy_external_finance_cost = np.zeros((nk, np_grid, nz), dtype=float)
+
+    alpha = float(fixed_params["alpha"])
+    profit_intercept = float(fixed_params["profit_intercept"])
+    production_scale = float(fixed_params["production_scale"])
+    fixed_cost = float(fixed_params["fixed_cost"])
+    cash_return_rate = float(fixed_params["cash_return_rate"])
+    psi = float(theta[0])
+    lam = float(theta[1])
+
+    q_cash = 1.0 / (1.0 + cash_return_rate)
 
     converged = False
     max_diff = np.inf
 
     for it in range(dp["max_iter"]):
         V_new = np.zeros_like(V)
+
+        # Precompute:
+        #   EV(k', p', iz) = E[V(k', p', z') | current z = z_iz]
+        expected_value_by_z = np.tensordot(V, z_transition.T, axes=([2], [0]))
 
         for ik, k in enumerate(k_grid):
             kprime_grid = build_kprime_grid(
@@ -355,57 +505,107 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
                 delta=delta,
             )
 
-            for iz, z in enumerate(z_grid):
-                best_value = -np.inf
-                best_kprime = kprime_grid[0]
-                best_i = investment_rate_from_kprime(
-                    k=k,
-                    kprime=kprime_grid[0],
-                    delta=delta,
+            for ip, p in enumerate(p_grid):
+                pprime_grid = build_pprime_grid(config=config, current_p=p)
+
+                kprime_mesh, pprime_mesh = np.meshgrid(
+                    kprime_grid,
+                    pprime_grid,
+                    indexing="ij",
                 )
-                best_profit = 0.0
-                best_investment_expenditure = 0.0
-                best_adjustment_cost = 0.0
-                best_external_finance = 0.0
-                best_external_finance_cost = 0.0
+                kprime_vec = kprime_mesh.ravel()
+                pprime_vec = pprime_mesh.ravel()
 
-                for kprime in kprime_grid:
-                    period = one_period_payoff_from_kprime(
-                        k=k,
-                        z=z,
-                        kprime=kprime,
-                        theta=theta,
-                        fixed_params=fixed_params,
+                investment_rate_vec = (kprime_vec / max(k, 1e-8)) - (1.0 - delta)
+                investment_expenditure_vec = kprime_vec - (1.0 - delta) * k
+                adj_cost_vec = 0.5 * psi * (investment_rate_vec**2) * k
+
+                for iz, z in enumerate(z_grid):
+                    prof = float(
+                        profit(
+                            k=k,
+                            z=z,
+                            alpha=alpha,
+                            profit_intercept=profit_intercept,
+                            production_scale=production_scale,
+                            fixed_cost=fixed_cost,
+                        )
                     )
 
-                    continuation = expected_continuation_value(
-                        k_next=kprime,
-                        iz=iz,
-                        V=V,
-                        k_grid=k_grid,
-                        z_transition=z_transition,
+                    # IMPORTANT CONSISTENCY FIX:
+                    # Match the timing in src/model.py exactly:
+                    #
+                    #   ext_finance = max(
+                    #       investment + adj_cost + q_cash * pprime
+                    #       - profits - current_cash,
+                    #       0
+                    #   )
+                    #
+                    #   payoff = profits + current_cash - investment - adj_cost
+                    #            - q_cash * pprime - lambda * ext_finance
+                    #
+                    # So the solver and simulator now solve the same model.
+                    next_cash_cost_vec = q_cash * pprime_vec
+
+                    ext_finance_vec = np.maximum(
+                        investment_expenditure_vec
+                        + adj_cost_vec
+                        + next_cash_cost_vec
+                        - prof
+                        - p,
+                        0.0,
                     )
 
-                    candidate_value = period["payoff"] + beta * continuation
+                    ext_finance_cost_vec = lam * ext_finance_vec
 
-                    if candidate_value > best_value:
-                        best_value = candidate_value
-                        best_kprime = kprime
-                        best_i = period["investment_rate"]
-                        best_profit = period["profit"]
-                        best_investment_expenditure = period["investment_expenditure"]
-                        best_adjustment_cost = period["adjustment_cost"]
-                        best_external_finance = period["external_finance"]
-                        best_external_finance_cost = period["external_finance_cost"]
+                    payoff_vec = (
+                        prof
+                        + p
+                        - investment_expenditure_vec
+                        - adj_cost_vec
+                        - next_cash_cost_vec
+                        - ext_finance_cost_vec
+                    )
 
-                V_new[ik, iz] = best_value
-                policy_kprime[ik, iz] = best_kprime
-                policy_i[ik, iz] = best_i
-                policy_profit[ik, iz] = best_profit
-                policy_investment_expenditure[ik, iz] = best_investment_expenditure
-                policy_adjustment_cost[ik, iz] = best_adjustment_cost
-                policy_external_finance[ik, iz] = best_external_finance
-                policy_external_finance_cost[ik, iz] = best_external_finance_cost
+                    continuation_vec = _bilinear_interp_2d_vectorized(
+                        x_grid=k_grid,
+                        y_grid=p_grid,
+                        values=expected_value_by_z[:, :, iz],
+                        x_points=kprime_vec,
+                        y_points=pprime_vec,
+                    )
+
+                    candidate_value_vec = payoff_vec + beta * continuation_vec
+
+                    best_flat_idx = int(np.argmax(candidate_value_vec))
+                    best_value = float(candidate_value_vec[best_flat_idx])
+
+                    best_kprime = float(kprime_vec[best_flat_idx])
+                    best_pprime = float(pprime_vec[best_flat_idx])
+                    best_i = float(investment_rate_vec[best_flat_idx])
+                    best_profit = prof
+                    best_investment_expenditure = float(
+                        investment_expenditure_vec[best_flat_idx]
+                    )
+                    best_adjustment_cost = float(adj_cost_vec[best_flat_idx])
+                    best_external_finance = float(ext_finance_vec[best_flat_idx])
+                    best_external_finance_cost = float(
+                        ext_finance_cost_vec[best_flat_idx]
+                    )
+
+                    V_new[ik, ip, iz] = best_value
+                    policy_kprime[ik, ip, iz] = best_kprime
+                    policy_pprime[ik, ip, iz] = best_pprime
+                    policy_i[ik, ip, iz] = best_i
+                    policy_profit[ik, ip, iz] = best_profit
+                    policy_investment_expenditure[ik, ip, iz] = (
+                        best_investment_expenditure
+                    )
+                    policy_adjustment_cost[ik, ip, iz] = best_adjustment_cost
+                    policy_external_finance[ik, ip, iz] = best_external_finance
+                    policy_external_finance_cost[ik, ip, iz] = (
+                        best_external_finance_cost
+                    )
 
         max_diff = float(np.max(np.abs(V_new - V)))
         V = V_new
@@ -418,11 +618,13 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
 
     return {
         "k_grid": k_grid,
+        "p_grid": p_grid,
         "log_z_grid": log_z_grid,
         "z_grid": z_grid,
         "z_transition": z_transition,
         "value_function": V,
         "policy_kprime": policy_kprime,
+        "policy_pprime": policy_pprime,
         "policy_investment": policy_i,
         "policy_profit": policy_profit,
         "policy_investment_expenditure": policy_investment_expenditure,
@@ -439,17 +641,47 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
     }
 
 
-def interpolate_policy_investment(k, log_z, solution):
+def interpolate_policy_investment(k, p, log_z, solution):
     """
     Evaluate solved investment policy at continuous states using:
     - nearest neighbor in log z
-    - linear interpolation in k
+    - bilinear interpolation in (k, p)
     """
     k_grid = solution["k_grid"]
+    p_grid = solution["p_grid"]
     log_z_grid = solution["log_z_grid"]
     policy_i = solution["policy_investment"]
 
     iz = int(np.argmin(np.abs(log_z_grid - log_z)))
-    policy_slice = policy_i[:, iz]
+    policy_slice = policy_i[:, :, iz]
 
-    return linear_interp_1d(k_grid, policy_slice, k)
+    return bilinear_interp_2d(
+        x_grid=k_grid,
+        y_grid=p_grid,
+        values=policy_slice,
+        x=k,
+        y=p,
+    )
+
+
+def interpolate_policy_cash_next(k, p, log_z, solution):
+    """
+    Evaluate solved next-cash policy p'(k,p,z) at continuous states using:
+    - nearest neighbor in log z
+    - bilinear interpolation in (k, p)
+    """
+    k_grid = solution["k_grid"]
+    p_grid = solution["p_grid"]
+    log_z_grid = solution["log_z_grid"]
+    policy_pprime = solution["policy_pprime"]
+
+    iz = int(np.argmin(np.abs(log_z_grid - log_z)))
+    policy_slice = policy_pprime[:, :, iz]
+
+    return bilinear_interp_2d(
+        x_grid=k_grid,
+        y_grid=p_grid,
+        values=policy_slice,
+        x=k,
+        y=p,
+    )

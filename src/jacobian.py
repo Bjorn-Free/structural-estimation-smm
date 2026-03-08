@@ -1,7 +1,37 @@
+import copy
 import numpy as np
 
 from src.moments import moment_covariance_matrix
-from src.simulate import simulate_moments
+from src.simulate import simulate_moments, _get_simulation_settings
+from src.dp_solver import solve_investment_dp
+from src.model import get_fixed_params
+
+
+def _simulate_moments_fast(theta, config):
+    """
+    Fast simulation wrapper used during Jacobian evaluation.
+
+    This enforces the same optimization used elsewhere in the project:
+
+        solve DP once
+        -> reuse policy functions inside simulation
+
+    Without this wrapper, the Jacobian would accidentally solve the DP
+    twice per parameter perturbation.
+    """
+    config_run = copy.deepcopy(config)
+    fixed_params = get_fixed_params(config_run)
+
+    solution = solve_investment_dp(
+        theta=np.asarray(theta, dtype=float),
+        config=config_run,
+        fixed_params=fixed_params,
+    )
+
+    return np.asarray(
+        simulate_moments(theta, config_run, solution=solution),
+        dtype=float,
+    )
 
 
 def numerical_jacobian(theta_hat, config, relative_step=1e-2, minimum_step=1e-4):
@@ -19,7 +49,7 @@ def numerical_jacobian(theta_hat, config, relative_step=1e-2, minimum_step=1e-4)
     theta_hat = np.asarray(theta_hat, dtype=float)
     n_params = theta_hat.size
 
-    base_moments = np.asarray(simulate_moments(theta_hat, config), dtype=float)
+    base_moments = _simulate_moments_fast(theta_hat, config)
     n_moments = base_moments.size
 
     J = np.zeros((n_moments, n_params), dtype=float)
@@ -33,11 +63,13 @@ def numerical_jacobian(theta_hat, config, relative_step=1e-2, minimum_step=1e-4)
         theta_plus[j] += h
         theta_minus[j] -= h
 
-        m_plus = np.asarray(simulate_moments(theta_plus, config), dtype=float)
-        m_minus = np.asarray(simulate_moments(theta_minus, config), dtype=float)
+        m_plus = _simulate_moments_fast(theta_plus, config)
+        m_minus = _simulate_moments_fast(theta_minus, config)
 
         if m_plus.shape != base_moments.shape or m_minus.shape != base_moments.shape:
-            raise ValueError("Simulated moment vector shape changed during Jacobian evaluation.")
+            raise ValueError(
+                "Simulated moment vector shape changed during Jacobian evaluation."
+            )
 
         J[:, j] = (m_plus - m_minus) / (2.0 * h)
 
@@ -45,42 +77,6 @@ def numerical_jacobian(theta_hat, config, relative_step=1e-2, minimum_step=1e-4)
         raise ValueError("Jacobian contains non-finite values.")
 
     return J
-
-
-def _get_first_available_value(container, candidate_keys, name_for_error):
-    """
-    Return the first available value from a dictionary given a list of
-    candidate keys.
-    """
-    for key in candidate_keys:
-        if key in container:
-            return container[key]
-
-    raise KeyError(
-        f"Could not find an entry for '{name_for_error}'. "
-        f"Tried keys: {candidate_keys}"
-    )
-
-
-def _get_simulation_config(config):
-    """
-    Return the simulation config block.
-
-    In this project, simulation settings are stored under:
-        config["simulation"]
-    """
-    if "simulation" not in config:
-        raise KeyError(
-            "Could not find 'simulation' block in config. "
-            "Expected simulation settings inside config['simulation']."
-        )
-
-    sim_cfg = config["simulation"]
-
-    if not isinstance(sim_cfg, dict):
-        raise ValueError("config['simulation'] must be a dictionary.")
-
-    return sim_cfg
 
 
 def simulation_to_data_ratio(df, config):
@@ -92,43 +88,26 @@ def simulation_to_data_ratio(df, config):
         j_ratio = N_sim / N_data
 
     where:
-    - N_sim  = number of simulated firm-year observations used for moments
+    - N_sim  = number of simulated firm-year observations actually used
+               by the simulator after effective runtime settings are applied
     - N_data = number of empirical firm-year observations used for moments
 
-    With the current project settings:
-        N_sim = n_firms * (t_periods - burn_in)
+    Important
+    ---------
+    This function uses the same effective simulation settings as src.simulate,
+    so debug/validation overrides are handled consistently.
     """
     n_data = len(df)
     if n_data <= 0:
         raise ValueError("Empirical dataset has no observations.")
 
-    sim_cfg = _get_simulation_config(config)
+    sim_cfg = _get_simulation_settings(config)
 
-    n_firms = int(
-        _get_first_available_value(
-            sim_cfg,
-            ["n_firms", "num_firms", "number_of_firms"],
-            "number of simulated firms",
-        )
-    )
+    n_firms = int(sim_cfg["n_firms"])
+    t_periods = int(sim_cfg["t_periods"])
+    burn_in = int(sim_cfg["burn_in"])
 
-    n_periods = int(
-        _get_first_available_value(
-            sim_cfg,
-            ["t_periods", "n_periods", "num_periods", "simulation_periods"],
-            "number of simulation periods",
-        )
-    )
-
-    burn_in = int(
-        _get_first_available_value(
-            sim_cfg,
-            ["burn_in", "burnin", "burn_in_periods"],
-            "burn-in periods",
-        )
-    )
-
-    n_sim = n_firms * max(n_periods - burn_in, 1)
+    n_sim = n_firms * max(t_periods, 1)
     j_ratio = float(n_sim) / float(n_data)
 
     if j_ratio <= 0 or not np.isfinite(j_ratio):
@@ -198,7 +177,9 @@ def smm_parameter_vcov(theta_hat, W, df, config, J=None, use_efficient_formula=T
     V = 0.5 * (V + V.T)
 
     if not np.isfinite(V).all():
-        raise ValueError("Parameter variance-covariance matrix contains non-finite values.")
+        raise ValueError(
+            "Parameter variance-covariance matrix contains non-finite values."
+        )
 
     return V
 

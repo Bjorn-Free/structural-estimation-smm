@@ -1,8 +1,12 @@
+import copy
+
 import numpy as np
 from scipy.optimize import minimize
 
 from src.moments import moment_covariance_matrix
 from src.simulate import simulate_moments
+from src.dp_solver import solve_investment_dp
+from src.model import get_fixed_params
 
 
 def make_weighting_matrix(df, config, return_details=False):
@@ -32,13 +36,11 @@ def make_weighting_matrix(df, config, return_details=False):
     if not np.isfinite(S).all():
         raise ValueError("Moment covariance matrix contains non-finite values.")
 
-    # Force exact symmetry
     S = 0.5 * (S + S.T)
 
     diag_S = np.diag(S).copy()
     avg_diag = float(np.mean(diag_S)) if diag_S.size > 0 else 1.0
 
-    # Scaled ridge for finite-sample numerical stability
     ridge_scale = max(1e-8, 1e-6 * max(abs(avg_diag), 1.0))
     ridge = ridge_scale * np.eye(S.shape[0])
 
@@ -84,17 +86,57 @@ def identity_weighting_matrix(config):
     return np.eye(n_moments, dtype=float)
 
 
+def _solve_dp_for_theta(theta, config):
+    """
+    Solve the DP once for a given theta/config pair.
+
+    We deep-copy config so temporary caches or run-specific mutations do not
+    pollute the outer estimation environment.
+    """
+    config_run = copy.deepcopy(config)
+    fixed_params_run = get_fixed_params(config_run)
+
+    solution = solve_investment_dp(
+        theta=np.asarray(theta, dtype=float),
+        config=config_run,
+        fixed_params=fixed_params_run,
+    )
+    return solution, config_run
+
+
+def _simulate_moments_from_theta(theta, config):
+    """
+    Solve the DP once, then simulate moments using the supplied policy functions.
+
+    This is the key structural-estimation speed improvement:
+    do not let the simulator solve the DP a second time.
+    """
+    solution, config_run = _solve_dp_for_theta(theta, config)
+
+    m_sim = np.asarray(
+        simulate_moments(theta, config_run, solution=solution),
+        dtype=float,
+    )
+
+    return m_sim, solution, config_run
+
+
 def smm_objective(theta, m_data, W, config):
     """
     SMM objective function:
 
         Q(theta) = (m_data - m_sim(theta))' W (m_data - m_sim(theta))
+
+    Performance note
+    ----------------
+    This implementation solves the DP exactly once per objective evaluation and
+    then reuses the solved policy functions inside simulation.
     """
     theta = np.asarray(theta, dtype=float)
     m_data = np.asarray(m_data, dtype=float)
     W = np.asarray(W, dtype=float)
 
-    m_sim = np.asarray(simulate_moments(theta, config), dtype=float)
+    m_sim, _, _ = _simulate_moments_from_theta(theta, config)
 
     if m_sim.shape != m_data.shape:
         raise ValueError(
@@ -144,25 +186,138 @@ def objective_contribution_matrix(moment_errors, W):
     return C
 
 
+def _normalize_theta_to_unit_box(theta, bounds):
+    """
+    Map theta from bounded parameter space to unit box coordinates.
+    """
+    theta = np.asarray(theta, dtype=float)
+    x = np.empty_like(theta, dtype=float)
+
+    for i, (value, bound) in enumerate(zip(theta, bounds)):
+        lower, upper = float(bound[0]), float(bound[1])
+        width = upper - lower
+
+        if width <= 0.0:
+            raise ValueError(f"Invalid bound width at index {i}: {bound}")
+
+        x[i] = (value - lower) / width
+
+    return np.clip(x, 0.0, 1.0)
+
+
+def _map_unit_box_to_theta(x, bounds):
+    """
+    Map unit box coordinates back into bounded parameter space.
+    """
+    x = np.asarray(x, dtype=float)
+    theta = np.empty_like(x, dtype=float)
+
+    for i, (value, bound) in enumerate(zip(x, bounds)):
+        lower, upper = float(bound[0]), float(bound[1])
+        theta[i] = lower + np.clip(value, 0.0, 1.0) * (upper - lower)
+
+    return theta
+
+
+def _penalized_unit_box_objective(x, m_data, W, config, bounds):
+    """
+    Derivative-free objective on the unit box.
+
+    We optimize over x in R^n, then:
+    - clip x softly through a quadratic penalty if it leaves [0,1]^n
+    - map back to theta using the original parameter bounds
+
+    This lets us use Nelder-Mead while still respecting the original bounds.
+    """
+    x = np.asarray(x, dtype=float)
+
+    below = np.minimum(x, 0.0)
+    above = np.maximum(x - 1.0, 0.0)
+    penalty = 1e6 * float(np.sum(below**2 + above**2))
+
+    x_clipped = np.clip(x, 0.0, 1.0)
+    theta = _map_unit_box_to_theta(x_clipped, bounds)
+
+    return smm_objective(theta, m_data, W, config) + penalty
+
+
+def _get_optimizer_method(config):
+    """
+    Retrieve the optimizer method for the current run.
+    """
+    return str(config.get("smm_optimizer_method", "Nelder-Mead"))
+
+
+def _get_optimizer_options(config):
+    """
+    Retrieve and normalize optimizer options for the current capped run.
+    """
+    optimizer_options = copy.deepcopy(config.get("smm_optimizer_options", {}))
+
+    if not optimizer_options:
+        optimizer_options = {
+            "maxiter": 40,
+            "maxfev": 80,
+            "xatol": 1e-3,
+            "fatol": 1e-3,
+            "adaptive": True,
+        }
+
+    optimizer_options.setdefault("maxiter", 40)
+    optimizer_options.setdefault("maxfev", 80)
+    optimizer_options.setdefault("xatol", 1e-3)
+    optimizer_options.setdefault("fatol", 1e-3)
+    optimizer_options.setdefault("adaptive", True)
+
+    if "disp" in optimizer_options:
+        optimizer_options.pop("disp")
+
+    return optimizer_options
+
+
 def estimate_smm(theta0, bounds, m_data, W, config):
     """
     Estimate structural parameters by minimizing the SMM objective.
+
+    Current recommended capped test:
+    - use a derivative-free optimizer
+    - keep the run short
+    - verify that the objective moves from the starting point
+
+    Implementation detail
+    ---------------------
+    We optimize on the unit box using Nelder-Mead and map back to theta
+    using the original parameter bounds.
     """
     theta0 = np.asarray(theta0, dtype=float)
     m_data = np.asarray(m_data, dtype=float)
     W = np.asarray(W, dtype=float)
     bounds = [tuple(b) for b in bounds]
 
+    optimizer_method = _get_optimizer_method(config)
+    optimizer_options = _get_optimizer_options(config)
+
+    if optimizer_method != "Nelder-Mead":
+        raise ValueError(
+            "This capped derivative-free test is configured for "
+            "smm_optimizer_method = 'Nelder-Mead'."
+        )
+
+    objective_initial = smm_objective(theta0, m_data, W, config)
+
+    x0 = _normalize_theta_to_unit_box(theta0, bounds)
+
     result = minimize(
-        fun=smm_objective,
-        x0=theta0,
-        args=(m_data, W, config),
-        method="L-BFGS-B",
-        bounds=bounds,
+        fun=_penalized_unit_box_objective,
+        x0=x0,
+        args=(m_data, W, config, bounds),
+        method=optimizer_method,
+        options=optimizer_options,
     )
 
-    theta_hat = np.asarray(result.x, dtype=float)
-    m_sim_hat = np.asarray(simulate_moments(theta_hat, config), dtype=float)
+    theta_hat = _map_unit_box_to_theta(result.x, bounds)
+
+    m_sim_hat, solution_hat, config_hat = _simulate_moments_from_theta(theta_hat, config)
 
     if m_sim_hat.shape != m_data.shape:
         raise ValueError(
@@ -180,9 +335,13 @@ def estimate_smm(theta0, bounds, m_data, W, config):
     own_contributions = np.diag(contribution_matrix)
     total_contributions = contribution_matrix.sum(axis=1)
 
+    n_fun_eval = getattr(result, "nfev", np.nan)
+
     return {
-        "theta_hat": theta_hat,
+        "theta_hat": np.asarray(theta_hat, dtype=float),
+        "objective_initial": float(objective_initial),
         "objective_value": objective_value,
+        "objective_improvement": float(objective_initial - objective_value),
         "m_data": m_data,
         "m_sim": m_sim_hat,
         "moment_errors": diff_hat,
@@ -191,6 +350,11 @@ def estimate_smm(theta0, bounds, m_data, W, config):
         "objective_total_contributions": total_contributions,
         "success": bool(result.success),
         "message": result.message,
-        "n_iter": int(result.nit),
+        "n_iter": int(getattr(result, "nit", 0)),
+        "n_fun_eval": int(n_fun_eval) if np.isfinite(n_fun_eval) else -1,
         "optimizer_result": result,
+        "solution_hat": solution_hat,
+        "config_hat": config_hat,
+        "optimizer_method": optimizer_method,
+        "optimizer_options": optimizer_options,
     }

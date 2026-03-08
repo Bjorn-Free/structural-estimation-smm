@@ -6,17 +6,16 @@ def moment_names(config: dict) -> list[str]:
     """
     Names of empirical moments used in SMM estimation.
 
-    Because we plan to implement the cash extension, we target
-    mean / variance / autocorrelation blocks for the core model objects:
-    investment, leverage, profitability, and cash.
+    After dropping leverage from the structural target set, we match
+    mean / variance / autocorrelation blocks for:
+    - investment
+    - profitability
+    - cash_ratio
     """
     return [
         "mean_investment",
         "var_investment",
         "autocorr_investment",
-        "mean_leverage",
-        "var_leverage",
-        "autocorr_leverage",
         "mean_profitability",
         "var_profitability",
         "autocorr_profitability",
@@ -34,7 +33,6 @@ def _validate_required_columns(df: pd.DataFrame) -> pd.DataFrame:
         "gvkey",
         "fyear",
         "investment",
-        "leverage",
         "profitability",
         "cash_ratio",
     ]
@@ -70,7 +68,7 @@ def _pooled_within_firm_autocorr(
     if len(valid) < 2:
         return np.nan
 
-    return valid[value_col].corr(valid[f"{value_col}_lag"])
+    return float(valid[value_col].corr(valid[f"{value_col}_lag"]))
 
 
 def _safe_mean(series: pd.Series) -> float:
@@ -124,8 +122,8 @@ def _autocorr_components(
     valid["x_dev"] = x_dev
     valid["y_dev"] = y_dev
     valid["cross"] = x_dev * y_dev
-    valid["x_sq"] = x_dev ** 2
-    valid["y_sq"] = y_dev ** 2
+    valid["x_sq"] = x_dev**2
+    valid["y_sq"] = y_dev**2
 
     return valid
 
@@ -138,7 +136,6 @@ def compute_moments(df: pd.DataFrame, config: dict) -> np.ndarray:
     - gvkey
     - fyear
     - investment
-    - leverage
     - profitability
     - cash_ratio
     """
@@ -154,18 +151,6 @@ def compute_moments(df: pd.DataFrame, config: dict) -> np.ndarray:
         firm_col="gvkey",
         time_col="fyear",
         value_col="investment",
-    )
-
-    # -----------------------------
-    # Leverage moments
-    # -----------------------------
-    mean_leverage = _safe_mean(work["leverage"])
-    var_leverage = _safe_variance(work["leverage"])
-    autocorr_leverage = _pooled_within_firm_autocorr(
-        df=work,
-        firm_col="gvkey",
-        time_col="fyear",
-        value_col="leverage",
     )
 
     # -----------------------------
@@ -197,9 +182,6 @@ def compute_moments(df: pd.DataFrame, config: dict) -> np.ndarray:
             mean_investment,
             var_investment,
             autocorr_investment,
-            mean_leverage,
-            var_leverage,
-            autocorr_leverage,
             mean_profitability,
             var_profitability,
             autocorr_profitability,
@@ -243,7 +225,6 @@ def moment_contributions(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     variables = [
         "investment",
-        "leverage",
         "profitability",
         "cash_ratio",
     ]
@@ -298,7 +279,11 @@ def moment_contributions(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             - 0.5 * rho * (ac["y_sq"] - var_y) / max(var_y, 1e-12)
         )
 
-        ac_by_firm = ac.groupby("gvkey")["autocorr_contrib"].mean().rename(f"autocorr_{var}")
+        ac_by_firm = (
+            ac.groupby("gvkey")["autocorr_contrib"]
+            .mean()
+            .rename(f"autocorr_{var}")
+        )
         output = output.merge(ac_by_firm, on="gvkey", how="left")
 
     ordered_cols = ["gvkey"] + moment_names(config)
@@ -317,7 +302,7 @@ def moment_contributions(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
 def moment_covariance_matrix(df: pd.DataFrame, config: dict) -> np.ndarray:
     """
-    Estimate the covariance matrix of the empirical *sample moment vector*
+    Estimate the covariance matrix of the empirical sample moment vector
     using firm-level clustered moment contributions.
 
     Important:

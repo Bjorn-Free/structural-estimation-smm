@@ -8,6 +8,7 @@ DEFAULT_SIGMA = 0.35
 DEFAULT_PRODUCTION_SCALE = 0.65
 DEFAULT_FIXED_COST = 10.0
 DEFAULT_PROFIT_INTERCEPT = 0.00
+DEFAULT_CASH_RETURN_RATE = 0.02
 
 
 def unpack_theta(theta):
@@ -31,7 +32,7 @@ def get_fixed_params(config=None):
     - Section 3.1 backbone with capital and productivity
     - plus convex capital adjustment costs
     - plus costly external finance
-    - no structural cash yet
+    - plus cash as a structural state/control
 
     Operating profits are:
 
@@ -56,6 +57,9 @@ def get_fixed_params(config=None):
         ),
         "profit_intercept": float(
             model_cfg.get("profit_intercept", DEFAULT_PROFIT_INTERCEPT)
+        ),
+        "cash_return_rate": float(
+            model_cfg.get("cash_return_rate", DEFAULT_CASH_RETURN_RATE)
         ),
     }
 
@@ -142,17 +146,37 @@ def net_investment(k, kprime, delta):
     return kprime - (1.0 - delta) * k
 
 
-def period_payoff_adjustment_model(profits, investment, adj_cost):
+def current_cash_resources(cash):
     """
-    One-period payoff for the model with capital adjustment costs only:
+    Current cash holdings available as internal funds this period.
 
-        payoff = profits - net_investment - adjustment_cost
+    In the repaired Section 3.3-style implementation, current liquid assets
+    enter current resources one-for-one.
     """
-    profits = np.asarray(profits, dtype=float)
-    investment = np.asarray(investment, dtype=float)
-    adj_cost = np.asarray(adj_cost, dtype=float)
+    cash = np.asarray(cash, dtype=float)
+    return np.maximum(cash, 0.0)
 
-    return profits - investment - adj_cost
+
+def cash_purchase_price(cash_return_rate):
+    """
+    Price today of one unit of next-period liquid assets.
+
+    We approximate liquid assets as a one-period bond:
+        q_cash = 1 / (1 + r_cash)
+
+    so buying p' units today costs q_cash * p'.
+    """
+    cash_return_rate = float(cash_return_rate)
+    return 1.0 / (1.0 + cash_return_rate)
+
+
+def cash_purchase_cost(next_cash, cash_return_rate=DEFAULT_CASH_RETURN_RATE):
+    """
+    Current-period purchase cost of next-period liquid assets.
+    """
+    next_cash = np.maximum(np.asarray(next_cash, dtype=float), 0.0)
+    q_cash = cash_purchase_price(cash_return_rate)
+    return q_cash * next_cash
 
 
 def external_finance_needed(
@@ -163,14 +187,43 @@ def external_finance_needed(
     cash_change=0.0,
 ):
     """
-    Positive funding gap:
+    Generic positive funding gap:
 
         gap = investment + adjustment_cost + cash_change
               - profits - debt_change
-
-        ext_finance = max(gap, 0)
     """
     gap = investment + adj_cost + cash_change - profits - debt_change
+    return np.maximum(gap, 0.0)
+
+
+def external_finance_needed_with_cash(
+    profits,
+    current_cash,
+    next_cash,
+    investment,
+    adj_cost,
+    cash_return_rate=DEFAULT_CASH_RETURN_RATE,
+):
+    """
+    Positive funding gap for the structural cash model.
+
+    Uses:
+        investment + adjustment cost + purchase_cost(next_cash)
+
+    Internal funds:
+        profits + current cash holdings
+
+    Therefore:
+        ext_finance = max(investment + adj_cost + q_cash * next_cash
+                          - profits - current_cash, 0)
+
+    This is closer to the Section 3.3 liquid-asset timing than the previous
+    zero-return / one-for-one carry formulation.
+    """
+    current_cash = current_cash_resources(current_cash)
+    next_cash_cost = cash_purchase_cost(next_cash, cash_return_rate)
+
+    gap = investment + adj_cost + next_cash_cost - profits - current_cash
     return np.maximum(gap, 0.0)
 
 
@@ -190,21 +243,9 @@ def payout(
     cash_change=0.0,
 ):
     """
-    Net payout after real-side uses and external finance costs:
+    Net payout after real-side uses and external finance costs.
 
-        ext_finance = max(investment + adj_cost + cash_change
-                          - profits - debt_change, 0)
-
-        payout = profits
-                 - investment
-                 - adj_cost
-                 - cash_change
-                 + debt_change
-                 - lam * ext_finance
-
-    In the current stage:
-    - debt_change = 0
-    - cash_change = 0
+    Reserved generic form from earlier stages.
     """
     ext_finance = external_finance_needed(
         profits=profits,
@@ -226,21 +267,52 @@ def payout(
     )
 
 
-def period_payoff_financing_model(profits, investment, adj_cost, lam):
+def period_payoff_cash_model(
+    profits,
+    current_cash,
+    next_cash,
+    investment,
+    adj_cost,
+    lam,
+    cash_return_rate=DEFAULT_CASH_RETURN_RATE,
+):
     """
-    One-period payoff for the current model stage:
+    One-period payoff for the repaired structural cash model:
 
-        payoff = profits - investment - adjustment_cost - external_finance_cost
+        payoff = profits
+                 + current_cash
+                 - investment
+                 - adjustment_cost
+                 - q_cash * next_cash
+                 - lambda * external_finance
 
-    where external finance is raised only when internal funds are insufficient.
+    where:
+        q_cash = 1 / (1 + r_cash)
+
+    This is a closer implementation of Section 3.3's idea that liquid assets
+    are purchased today and pay off next period.
     """
-    return payout(
+    current_cash_value = current_cash_resources(current_cash)
+    next_cash_cost = cash_purchase_cost(next_cash, cash_return_rate)
+
+    ext_finance = external_finance_needed_with_cash(
         profits=profits,
+        current_cash=current_cash,
+        next_cash=next_cash,
         investment=investment,
         adj_cost=adj_cost,
-        lam=lam,
-        debt_change=0.0,
-        cash_change=0.0,
+        cash_return_rate=cash_return_rate,
+    )
+
+    ext_finance_cost_value = external_finance_cost(ext_finance, lam)
+
+    return (
+        profits
+        + current_cash_value
+        - investment
+        - adj_cost
+        - next_cash_cost
+        - ext_finance_cost_value
     )
 
 
@@ -294,7 +366,7 @@ def target_debt_ratio(
     """
     Reduced-form placeholder leverage rule.
 
-    Debt is not structural at the current stage and is retained only to
+    Debt is still not structural at the current stage and is retained only to
     preserve the broader simulation/reporting scaffolding.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
@@ -316,10 +388,10 @@ def target_cash_ratio(
     lam_sensitivity=0.45,
 ):
     """
-    Reduced-form placeholder cash rule.
+    Legacy reduced-form placeholder cash rule.
 
-    Cash is not structural at the current stage and is retained only to
-    preserve the broader simulation/reporting scaffolding.
+    This is retained only as a fallback/scaffolding object. The current solved
+    model stage treats cash structurally.
     """
     z_centered = np.log(np.maximum(z, 1e-8))
 

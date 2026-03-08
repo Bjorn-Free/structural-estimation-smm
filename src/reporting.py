@@ -39,6 +39,12 @@ def _save_table(df: pd.DataFrame, filename_stem: str, decimals: int = 4):
 
 
 def make_summary_statistics_table(df: pd.DataFrame):
+    """
+    Descriptive table for the cleaned Compustat sample.
+
+    Keeping leverage here is fine as a descriptive variable even though it is
+    no longer part of the targeted SMM moment vector.
+    """
     variables = [
         ("Investment / Capital", "investment"),
         ("Debt / Assets", "leverage"),
@@ -51,6 +57,9 @@ def make_summary_statistics_table(df: pd.DataFrame):
     rows = []
 
     for label, col in variables:
+        if col not in df.columns:
+            continue
+
         series = pd.to_numeric(df[col], errors="coerce").dropna()
 
         rows.append(
@@ -78,9 +87,6 @@ def make_moment_comparison_table(moment_labels, m_data, m_sim):
         "mean_investment": "Mean investment",
         "var_investment": "Variance investment",
         "autocorr_investment": "Autocorrelation investment",
-        "mean_leverage": "Mean leverage",
-        "var_leverage": "Variance leverage",
-        "autocorr_leverage": "Autocorrelation leverage",
         "mean_profitability": "Mean profitability",
         "var_profitability": "Variance profitability",
         "autocorr_profitability": "Autocorrelation profitability",
@@ -157,7 +163,12 @@ def make_estimation_settings_table(config, objective_value, weighting_matrix_nam
     return pd.DataFrame(rows)
 
 
-def save_estimation_settings_table(config, objective_value, weighting_matrix_name="Identity", decimals: int = 4):
+def save_estimation_settings_table(
+    config,
+    objective_value,
+    weighting_matrix_name="Identity",
+    decimals: int = 4,
+):
     df = make_estimation_settings_table(
         config=config,
         objective_value=objective_value,
