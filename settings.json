@@ -1,23 +1,25 @@
 {
-  "debug_mode": true,
+  "debug_mode": false,
   "validation_mode": "medium",
 
   "rebuild_data": false,
   "raw_data_path": "data/raw/compustat_raw.csv",
   "clean_data_path": "data/clean/compustat_clean.csv",
 
-  "theta0": [0.15, 6.0],
+  "theta0": [0.078389, 4.014213, 0.890673, 0.448149],
 
   "bounds": [
-    [0.0001, 10.0],
-    [0.0001, 10.0]
+    [0.01, 1.0],
+    [0.1, 15.0],
+    [0.6, 0.95],
+    [0.1, 0.5]
   ],
 
   "smm_optimizer_method": "Nelder-Mead",
 
   "smm_optimizer_options": {
-    "maxiter": 80,
-    "maxfev": 160,
+    "maxiter": 150,
+    "maxfev": 250,
     "xatol": 0.001,
     "fatol": 0.001,
     "adaptive": true

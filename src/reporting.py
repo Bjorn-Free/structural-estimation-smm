@@ -123,6 +123,12 @@ def make_parameter_table(theta_hat, param_names=None, std_errors=None):
     param_map = {
         "psi_adjustment_cost": r"$\psi$ adjustment cost",
         "lambda_external_finance_cost": r"$\lambda$ external finance cost",
+        "rho_productivity_persistence": r"$\rho$ productivity persistence",
+        "sigma_productivity_volatility": r"$\sigma$ productivity volatility",
+        "psi": r"$\psi$ adjustment cost",
+        "lambda_external_finance": r"$\lambda$ external finance cost",
+        "rho": r"$\rho$ productivity persistence",
+        "sigma": r"$\sigma$ productivity volatility",
     }
     pretty_names = [param_map.get(x, x) for x in param_names]
 

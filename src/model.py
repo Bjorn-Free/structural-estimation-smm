@@ -16,15 +16,22 @@ def unpack_theta(theta):
     Map estimated parameter vector into named parameters.
 
     Current stage:
-    - theta[0] = psi  -> convex capital adjustment cost
-    - theta[1] = lam  -> proportional costly external finance
+    - theta[0] = psi    -> convex capital adjustment cost
+    - theta[1] = lam    -> proportional costly external finance
+    - theta[2] = rho    -> productivity persistence
+    - theta[3] = sigma  -> productivity volatility
     """
+    theta = np.asarray(theta, dtype=float)
+
     psi = float(theta[0])
     lam = float(theta[1])
-    return {"psi": psi, "lam": lam}
+    rho = float(theta[2])
+    sigma = float(theta[3])
+
+    return {"psi": psi, "lam": lam, "rho": rho, "sigma": sigma}
 
 
-def get_fixed_params(config=None):
+def get_fixed_params(config=None, theta=None):
     """
     Fixed model parameters shared across simulation and the DP solver.
 
@@ -39,16 +46,33 @@ def get_fixed_params(config=None):
         profit(k, z) = production_scale * z * k^alpha
                        + profit_intercept * k
                        - fixed_cost
+
+    Important upgrade:
+    ------------------
+    rho and sigma can now come either from:
+    1. config["model"] as fallback defaults, or
+    2. theta if they are being estimated.
+
+    This keeps the rest of the codebase stable while allowing SMM to estimate:
+        theta = (psi, lambda, rho, sigma)
     """
     model_cfg = {}
     if config is not None:
         model_cfg = config.get("model", {})
 
+    rho_value = float(model_cfg.get("rho", DEFAULT_RHO))
+    sigma_value = float(model_cfg.get("sigma", DEFAULT_SIGMA))
+
+    if theta is not None:
+        theta_named = unpack_theta(theta)
+        rho_value = float(theta_named["rho"])
+        sigma_value = float(theta_named["sigma"])
+
     return {
         "alpha": float(model_cfg.get("alpha", DEFAULT_ALPHA)),
         "delta": float(model_cfg.get("delta", DEFAULT_DELTA)),
-        "rho": float(model_cfg.get("rho", DEFAULT_RHO)),
-        "sigma": float(model_cfg.get("sigma", DEFAULT_SIGMA)),
+        "rho": rho_value,
+        "sigma": sigma_value,
         "production_scale": float(
             model_cfg.get("production_scale", DEFAULT_PRODUCTION_SCALE)
         ),

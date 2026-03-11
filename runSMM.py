@@ -27,7 +27,7 @@ from src.smm import (
 TABLE_DIR = Path("results/tables")
 
 
-def build_policy_summary_table(solution, theta, label, rho_value, sigma_value):
+def build_policy_summary_table(solution, theta, label):
     """
     Summarize solved policy functions at representative grid points.
 
@@ -36,7 +36,11 @@ def build_policy_summary_table(solution, theta, label, rho_value, sigma_value):
     - controls = (k', p')
     - theta[0] = psi
     - theta[1] = lambda
+    - theta[2] = rho
+    - theta[3] = sigma
     """
+    theta = np.asarray(theta, dtype=float)
+
     k_grid = solution["k_grid"]
     p_grid = solution["p_grid"]
     z_grid = solution["z_grid"]
@@ -57,8 +61,8 @@ def build_policy_summary_table(solution, theta, label, rho_value, sigma_value):
                 rows.append(
                     {
                         "scenario": label,
-                        "rho": float(rho_value),
-                        "sigma": float(sigma_value),
+                        "rho": float(theta[2]),
+                        "sigma": float(theta[3]),
                         "psi": float(theta[0]),
                         "lambda_external_finance": float(theta[1]),
                         "k_index": int(ik),
@@ -99,17 +103,18 @@ def print_solver_diagnostics(solution):
     print(f"  share_interior           {solution['share_interior']:.6f}")
 
 
-def estimation_spec():
+def estimation_spec(config):
     """
     Starting point for the derivative-free capped SMM test.
 
-    This uses the best local point from the objective-surface test.
+    For the 4-parameter upgrade, use theta0 from settings.json so the run is
+    fully controlled by configuration.
     """
+    theta0 = np.asarray(config["theta0"], dtype=float)
+
     return {
-        "label": "best_local_start_for_derivative_free_smm",
-        "theta0": np.array([0.15, 6.00], dtype=float),
-        "rho": 0.90,
-        "sigma": 0.40,
+        "label": "four_parameter_smm",
+        "theta0": theta0,
     }
 
 
@@ -121,7 +126,12 @@ def save_estimation_results(moment_labels, theta_hat, m_data, m_sim):
 
     param_table = pd.DataFrame(
         {
-            "parameter": ["psi", "lambda_external_finance"],
+            "parameter": [
+                "psi",
+                "lambda_external_finance",
+                "rho",
+                "sigma",
+            ],
             "estimate": np.asarray(theta_hat, dtype=float),
         }
     )
@@ -160,6 +170,22 @@ def main():
     debug_mode = bool(config.get("debug_mode", False))
     validation_mode = config.get("validation_mode", "fast")
 
+    # Early verification prints so you can confirm the correct test is running
+    # before waiting for the expensive DP / simulation / SMM steps.
+    print("\n========================================")
+    print("CONFIG LOAD CHECK")
+    print("========================================")
+    print(f"Loaded theta0 from config: {config['theta0']}")
+    print(f"Loaded bounds from config: {config['bounds']}")
+    print(
+        "Loaded optimizer method from config: "
+        f"{config.get('smm_optimizer_method', 'Nelder-Mead')}"
+    )
+    print(
+        "Loaded optimizer options from config: "
+        f"{config.get('smm_optimizer_options', {})}"
+    )
+
     if config.get("rebuild_data", False):
         build_compustat(
             raw_path=config["raw_data_path"],
@@ -177,11 +203,9 @@ def main():
         decimals=4,
     )
 
-    spec = estimation_spec()
+    spec = estimation_spec(config)
     label = spec["label"]
     theta0 = np.asarray(spec["theta0"], dtype=float)
-    rho_value = float(spec["rho"])
-    sigma_value = float(spec["sigma"])
 
     print("\n========================================")
     print("DERIVATIVE-FREE CAPPED SMM TEST RUN")
@@ -191,8 +215,15 @@ def main():
     print(f"Number of targeted moments: {config['n_moments']}")
     print(f"Targeted moments: {moment_labels}")
     print(f"Starting theta0: {theta0}")
-    print(f"Fixed rho: {rho_value:.4f}")
-    print(f"Fixed sigma: {sigma_value:.4f}")
+    print(f"Bounds: {config['bounds']}")
+    print(
+        "Optimizer method: "
+        f"{config.get('smm_optimizer_method', 'Nelder-Mead')}"
+    )
+    print(
+        "Optimizer options: "
+        f"{config.get('smm_optimizer_options', {})}"
+    )
 
     print_vector_with_labels(
         title="Empirical target moments",
@@ -202,14 +233,12 @@ def main():
 
     config_run = copy.deepcopy(config)
     config_run["theta0"] = theta0.tolist()
-    config_run["model"]["rho"] = rho_value
-    config_run["model"]["sigma"] = sigma_value
 
     print("\n========================================")
     print("BASELINE DP CHECK AT STARTING VALUES")
     print("========================================")
 
-    fixed_params_run = get_fixed_params(config_run)
+    fixed_params_run = get_fixed_params(config_run, theta=theta0)
 
     baseline_solution = solve_investment_dp(
         theta=theta0,
@@ -250,8 +279,6 @@ def main():
         solution=baseline_solution,
         theta=theta0,
         label=label,
-        rho_value=rho_value,
-        sigma_value=sigma_value,
     )
     baseline_policy_csv = save_policy_table(
         baseline_policy_summary_df,
@@ -282,7 +309,7 @@ def main():
     print("STARTING DERIVATIVE-FREE CAPPED SMM")
     print("========================================")
     print(f"Initial parameters: {theta0}")
-    print(f"Optimizer method: {config_run.get('smm_optimizer_method', 'Powell')}")
+    print(f"Optimizer method: {config_run.get('smm_optimizer_method', 'Nelder-Mead')}")
     print(f"Optimizer options: {config_run.get('smm_optimizer_options', {})}")
 
     result = estimate_smm(
@@ -309,7 +336,10 @@ def main():
     print(f"Objective improvement:   {result['objective_improvement']:.8f}")
 
     print("\nEstimated parameters")
-    for name, val in zip(["psi", "lambda_external_finance"], theta_hat):
+    for name, val in zip(
+        ["psi", "lambda_external_finance", "rho", "sigma"],
+        theta_hat,
+    ):
         print(f"  {name:<28} {val:.6f}")
 
     print_vector_with_labels(
@@ -340,8 +370,6 @@ def main():
         solution=solution_hat,
         theta=theta_hat,
         label="estimated_theta_hat",
-        rho_value=rho_value,
-        sigma_value=sigma_value,
     )
     estimated_policy_csv = save_policy_table(
         estimated_policy_summary_df,

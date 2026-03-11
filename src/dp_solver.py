@@ -439,7 +439,7 @@ def compute_policy_bound_shares(policy_i: np.ndarray, config: dict):
     }
 
 
-def solve_investment_dp(theta, config: dict, fixed_params: dict):
+def solve_investment_dp(theta, config: dict, fixed_params: dict, initial_value_function=None):
     """
     Solve the repaired structural cash model with:
     - convex capital adjustment costs
@@ -451,6 +451,12 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
 
     Current controls:
         (k', p')
+
+    Minimal speed improvement:
+    --------------------------
+    If `initial_value_function` is supplied and has the correct shape, use it as
+    the initial guess for value function iteration. This warm start can
+    materially reduce iterations across nearby theta evaluations.
     """
     theta = np.asarray(theta, dtype=float)
 
@@ -467,7 +473,15 @@ def solve_investment_dp(theta, config: dict, fixed_params: dict):
     np_grid = len(p_grid)
     nz = len(z_grid)
 
-    V = np.zeros((nk, np_grid, nz), dtype=float)
+    expected_shape = (nk, np_grid, nz)
+    if initial_value_function is not None:
+        initial_value_function = np.asarray(initial_value_function, dtype=float)
+        if initial_value_function.shape == expected_shape and np.isfinite(initial_value_function).all():
+            V = initial_value_function.copy()
+        else:
+            V = np.zeros(expected_shape, dtype=float)
+    else:
+        V = np.zeros(expected_shape, dtype=float)
 
     policy_kprime = np.zeros((nk, np_grid, nz), dtype=float)
     policy_pprime = np.zeros((nk, np_grid, nz), dtype=float)

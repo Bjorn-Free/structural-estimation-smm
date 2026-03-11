@@ -228,8 +228,9 @@ def simulate_firm_panel(theta, config: dict, solution=None) -> pd.DataFrame:
     policy functions directly and does not solve the DP again. This is the
     standard structural-estimation workflow and can save substantial time in SMM.
     """
+    theta = np.asarray(theta, dtype=float)
     theta_named = unpack_theta(theta)
-    fixed = get_fixed_params(config)
+    fixed = get_fixed_params(config, theta=theta)
     sim = _get_simulation_settings(config)
     shocks = _get_or_create_simulation_shocks(config)
 

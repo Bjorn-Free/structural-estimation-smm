@@ -1,10 +1,23 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+
+# Notebook
 .ipynb_checkpoints/
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Data (do NOT upload WRDS/Compustat)
+data/raw/*
+data/clean/*
+
+# Allow placeholder files
+!data/raw/.gitkeep
+!data/clean/.gitkeep
+
+# Results
 results/*
 !results/.gitkeep
-data/*
-!data/README.md

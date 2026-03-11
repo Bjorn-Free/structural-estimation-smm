@@ -86,21 +86,70 @@ def identity_weighting_matrix(config):
     return np.eye(n_moments, dtype=float)
 
 
+def _get_smm_runtime_state(config: dict) -> dict:
+    """
+    Create or retrieve mutable runtime state used during a single SMM run.
+
+    Stored in config so:
+    - the objective can count evaluations,
+    - we can keep a warm-start value function for the next DP solve.
+
+    This does not change the economics of the model.
+    """
+    if "_smm_runtime_state" not in config:
+        config["_smm_runtime_state"] = {
+            "evaluation_count": 0,
+            "last_value_function": None,
+            "last_theta": None,
+        }
+    return config["_smm_runtime_state"]
+
+
+def reset_smm_runtime_state(config: dict):
+    """
+    Reset evaluation counter and warm-start cache for a fresh optimization run.
+    """
+    config["_smm_runtime_state"] = {
+        "evaluation_count": 0,
+        "last_value_function": None,
+        "last_theta": None,
+    }
+
+
 def _solve_dp_for_theta(theta, config):
     """
     Solve the DP once for a given theta/config pair.
 
     We deep-copy config so temporary caches or run-specific mutations do not
     pollute the outer estimation environment.
+
+    Minimal speed improvement:
+    --------------------------
+    If available, pass the previous value function as an initial guess to the
+    DP solver. This is a warm start and can substantially reduce iterations.
     """
+    theta = np.asarray(theta, dtype=float)
+    runtime_state = _get_smm_runtime_state(config)
+
     config_run = copy.deepcopy(config)
-    fixed_params_run = get_fixed_params(config_run)
+    fixed_params_run = get_fixed_params(config_run, theta=theta)
+
+    initial_value_function = runtime_state.get("last_value_function", None)
 
     solution = solve_investment_dp(
-        theta=np.asarray(theta, dtype=float),
+        theta=theta,
         config=config_run,
         fixed_params=fixed_params_run,
+        initial_value_function=initial_value_function,
     )
+
+    if "value_function" in solution:
+        runtime_state["last_value_function"] = np.asarray(
+            solution["value_function"],
+            dtype=float,
+        ).copy()
+    runtime_state["last_theta"] = theta.copy()
+
     return solution, config_run
 
 
@@ -131,12 +180,25 @@ def smm_objective(theta, m_data, W, config):
     ----------------
     This implementation solves the DP exactly once per objective evaluation and
     then reuses the solved policy functions inside simulation.
+
+    Usability improvement
+    ---------------------
+    Print a compact progress update every evaluation so long runs are no longer
+    a black box.
     """
     theta = np.asarray(theta, dtype=float)
     m_data = np.asarray(m_data, dtype=float)
     W = np.asarray(W, dtype=float)
 
-    m_sim, _, _ = _simulate_moments_from_theta(theta, config)
+    runtime_state = _get_smm_runtime_state(config)
+    runtime_state["evaluation_count"] += 1
+    eval_count = int(runtime_state["evaluation_count"])
+
+    print("\n----------------------------------------")
+    print(f"SMM evaluation {eval_count}")
+    print(f"theta = {np.array2string(theta, precision=6, separator=', ')}")
+
+    m_sim, solution, _ = _simulate_moments_from_theta(theta, config)
 
     if m_sim.shape != m_data.shape:
         raise ValueError(
@@ -149,6 +211,14 @@ def smm_objective(theta, m_data, W, config):
 
     if not np.isfinite(obj):
         raise ValueError("SMM objective evaluated to a non-finite value.")
+
+    print(f"objective = {obj:.8f}")
+    print(
+        "dp_diagnostics = "
+        f"(converged={solution['converged']}, "
+        f"iterations={solution['n_iter']}, "
+        f"bellman_sup_norm={solution['max_diff']:.8e})"
+    )
 
     return obj
 
@@ -302,6 +372,8 @@ def estimate_smm(theta0, bounds, m_data, W, config):
             "This capped derivative-free test is configured for "
             "smm_optimizer_method = 'Nelder-Mead'."
         )
+
+    reset_smm_runtime_state(config)
 
     objective_initial = smm_objective(theta0, m_data, W, config)
 

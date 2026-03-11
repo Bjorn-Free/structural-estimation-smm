@@ -56,8 +56,16 @@ def _validate_config(config: dict) -> dict:
     config.setdefault("debug_mode", False)
     config.setdefault("validation_mode", "fast")
     config.setdefault("rebuild_data", False)
-    config.setdefault("theta0", [0.1, 0.1])
-    config.setdefault("bounds", [[0.0001, 10.0], [0.0001, 10.0]])
+    config.setdefault("theta0", [0.1, 0.1, 0.8, 0.25])
+    config.setdefault(
+        "bounds",
+        [
+            [0.01, 1.0],
+            [0.1, 15.0],
+            [0.6, 0.95],
+            [0.1, 0.5],
+        ],
+    )
     config.setdefault("n_moments", 9)
 
     config.setdefault("model", {})
@@ -74,12 +82,12 @@ def _validate_config(config: dict) -> dict:
         raise KeyError(f"Missing required config entries: {missing}")
 
     theta0 = config.get("theta0")
-    if not isinstance(theta0, list) or len(theta0) != 2:
-        raise ValueError("config['theta0'] must be a list of length 2.")
+    if not isinstance(theta0, list) or len(theta0) != 4:
+        raise ValueError("config['theta0'] must be a list of length 4.")
 
     bounds = config.get("bounds")
-    if not isinstance(bounds, list) or len(bounds) != 2:
-        raise ValueError("config['bounds'] must be a list of length 2.")
+    if not isinstance(bounds, list) or len(bounds) != 4:
+        raise ValueError("config['bounds'] must be a list of length 4.")
 
     for i, bound in enumerate(bounds):
         if not isinstance(bound, list) or len(bound) != 2:
