@@ -14,6 +14,10 @@ from src.reporting import (
     save_moment_comparison_table,
     save_parameter_table,
     save_subsample_comparison_table,
+    save_estimation_settings_table,
+    save_identification_detailed_table,
+    save_identification_summary_table,
+    save_overidentification_note_table,
 )
 from src.simulate import simulate_panel
 from src.diagnostics_plots import (
@@ -132,6 +136,19 @@ def save_estimation_results(
         "sigma",
     ]
 
+    moment_label_map = {
+        "mean_investment": "Mean investment",
+        "var_investment": "Variance investment",
+        "autocorr_investment": "Autocorrelation investment",
+        "mean_profitability": "Mean profitability",
+        "var_profitability": "Variance profitability",
+        "autocorr_profitability": "Autocorrelation profitability",
+        "mean_cash_ratio": "Mean cash ratio",
+        "var_cash_ratio": "Variance cash ratio",
+        "autocorr_cash_ratio": "Autocorrelation cash ratio",
+    }
+    pretty_moment_labels = [moment_label_map.get(x, x) for x in moment_labels]
+
     param_table = pd.DataFrame(
         {
             "parameter": param_names,
@@ -147,7 +164,7 @@ def save_estimation_results(
 
     moment_table = pd.DataFrame(
         {
-            "moment": moment_labels,
+            "moment": pretty_moment_labels,
             "data": np.asarray(m_data, dtype=float),
             "simulated": np.asarray(m_sim, dtype=float),
             "gap": np.asarray(m_sim, dtype=float) - np.asarray(m_data, dtype=float),
@@ -367,12 +384,64 @@ def run_single_estimation(
             filename=f"{prefix}_estimated_policy_summary.csv",
         )
 
+        estimation_settings_df, estimation_settings_csv, estimation_settings_tex = (
+            save_estimation_settings_table(
+                config=config_run,
+                objective_value=result["objective_value"],
+                weighting_matrix_name="Efficient SMM",
+                decimals=4,
+                filename_stem=f"{prefix}_estimation_settings",
+                sample_label=sample_label,
+                n_obs=int(len(df)),
+                weighting_details=weighting_details,
+                optimizer_method=config_run.get("smm_optimizer_method", "Nelder-Mead"),
+                optimizer_options=config_run.get("smm_optimizer_options", {}),
+            )
+        )
+
+        identification_detail_df, identification_detail_csv, identification_detail_tex = (
+            save_identification_detailed_table(
+                moment_labels=moment_labels,
+                param_names=["psi", "lambda_external_finance", "rho", "sigma"],
+                jacobian=se_results["jacobian"],
+                decimals=6,
+                filename_stem=f"{prefix}_identification_jacobian",
+            )
+        )
+
+        identification_summary_df, identification_summary_csv, identification_summary_tex = (
+            save_identification_summary_table(
+                moment_labels=moment_labels,
+                param_names=["psi", "lambda_external_finance", "rho", "sigma"],
+                jacobian=se_results["jacobian"],
+                bread_condition_number=se_results["bread_condition_number"],
+                decimals=6,
+                filename_stem=f"{prefix}_identification_summary",
+            )
+        )
+
+        overid_note_df, overid_note_csv, overid_note_tex = save_overidentification_note_table(
+            sample_label=sample_label,
+            n_moments=len(moment_labels),
+            n_params=len(theta_hat),
+            filename_stem=f"{prefix}_overidentification_note",
+            decimals=4,
+        )
+
         saved_paths = {
             "param_csv": param_csv,
             "moment_csv": moment_csv,
             "pretty_param_csv": pretty_param_csv,
             "pretty_param_tex": pretty_param_tex,
             "estimated_policy_csv": estimated_policy_csv,
+            "estimation_settings_csv": estimation_settings_csv,
+            "estimation_settings_tex": estimation_settings_tex,
+            "identification_detail_csv": identification_detail_csv,
+            "identification_detail_tex": identification_detail_tex,
+            "identification_summary_csv": identification_summary_csv,
+            "identification_summary_tex": identification_summary_tex,
+            "overid_note_csv": overid_note_csv,
+            "overid_note_tex": overid_note_tex,
         }
     else:
         param_table = pd.DataFrame()
