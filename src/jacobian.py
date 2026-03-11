@@ -19,11 +19,12 @@ def _simulate_moments_fast(theta, config):
     Without this wrapper, the Jacobian would accidentally solve the DP
     twice per parameter perturbation.
     """
+    theta = np.asarray(theta, dtype=float)
     config_run = copy.deepcopy(config)
-    fixed_params = get_fixed_params(config_run)
+    fixed_params = get_fixed_params(config_run, theta=theta)
 
     solution = solve_investment_dp(
-        theta=np.asarray(theta, dtype=float),
+        theta=theta,
         config=config_run,
         fixed_params=fixed_params,
     )
@@ -91,11 +92,6 @@ def simulation_to_data_ratio(df, config):
     - N_sim  = number of simulated firm-year observations actually used
                by the simulator after effective runtime settings are applied
     - N_data = number of empirical firm-year observations used for moments
-
-    Important
-    ---------
-    This function uses the same effective simulation settings as src.simulate,
-    so debug/validation overrides are handled consistently.
     """
     n_data = len(df)
     if n_data <= 0:
@@ -105,7 +101,6 @@ def simulation_to_data_ratio(df, config):
 
     n_firms = int(sim_cfg["n_firms"])
     t_periods = int(sim_cfg["t_periods"])
-    burn_in = int(sim_cfg["burn_in"])
 
     n_sim = n_firms * max(t_periods, 1)
     j_ratio = float(n_sim) / float(n_data)
@@ -141,7 +136,6 @@ def smm_parameter_vcov(theta_hat, W, df, config, J=None, use_efficient_formula=T
         If True, use the efficient-SMM covariance formula with simulation
         adjustment:
             V = (1 + 1 / j_ratio) * (G' W G)^(-1)
-        where j_ratio = N_sim / N_data.
 
         If False, compute the more general sandwich:
             V = (1 + 1 / j_ratio) * (G' W G)^(-1) (G' W S W G) (G' W G)^(-1)

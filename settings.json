@@ -1,5 +1,5 @@
 {
-  "debug_mode": false,
+  "debug_mode": true,
   "validation_mode": "medium",
 
   "rebuild_data": false,
@@ -18,8 +18,8 @@
   "smm_optimizer_method": "Nelder-Mead",
 
   "smm_optimizer_options": {
-    "maxiter": 150,
-    "maxfev": 250,
+    "maxiter": 20,
+    "maxfev": 40,
     "xatol": 0.001,
     "fatol": 0.001,
     "adaptive": true

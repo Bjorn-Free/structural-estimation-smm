@@ -41,9 +41,6 @@ def _save_table(df: pd.DataFrame, filename_stem: str, decimals: int = 4):
 def make_summary_statistics_table(df: pd.DataFrame):
     """
     Descriptive table for the cleaned Compustat sample.
-
-    Keeping leverage here is fine as a descriptive variable even though it is
-    no longer part of the targeted SMM moment vector.
     """
     variables = [
         ("Investment / Capital", "investment"),
@@ -109,9 +106,15 @@ def make_moment_comparison_table(moment_labels, m_data, m_sim):
     return df
 
 
-def save_moment_comparison_table(moment_labels, m_data, m_sim, decimals: int = 4):
+def save_moment_comparison_table(
+    moment_labels,
+    m_data,
+    m_sim,
+    decimals: int = 4,
+    filename_stem: str = "moment_comparison",
+):
     df = make_moment_comparison_table(moment_labels, m_data, m_sim)
-    return _save_table(df, "moment_comparison", decimals=decimals)
+    return _save_table(df, filename_stem, decimals=decimals)
 
 
 def make_parameter_table(theta_hat, param_names=None, std_errors=None):
@@ -140,14 +143,23 @@ def make_parameter_table(theta_hat, param_names=None, std_errors=None):
     )
 
     if std_errors is not None:
-        df["std_error"] = np.asarray(std_errors, dtype=float)
+        std_errors = np.asarray(std_errors, dtype=float)
+        df["std_error"] = std_errors
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df["t_stat"] = theta_hat / std_errors
 
     return df
 
 
-def save_parameter_table(theta_hat, param_names=None, std_errors=None, decimals: int = 4):
+def save_parameter_table(
+    theta_hat,
+    param_names=None,
+    std_errors=None,
+    decimals: int = 4,
+    filename_stem: str = "parameter_estimates",
+):
     df = make_parameter_table(theta_hat, param_names=param_names, std_errors=std_errors)
-    return _save_table(df, "parameter_estimates", decimals=decimals)
+    return _save_table(df, filename_stem, decimals=decimals)
 
 
 def make_estimation_settings_table(config, objective_value, weighting_matrix_name="Identity"):
@@ -181,3 +193,53 @@ def save_estimation_settings_table(
         weighting_matrix_name=weighting_matrix_name,
     )
     return _save_table(df, "estimation_settings", decimals=decimals)
+
+
+def make_subsample_comparison_table(full_sample, small_firms, large_firms, split_info=None):
+    rows = []
+
+    param_names = ["psi", "lambda_external_finance", "rho", "sigma"]
+
+    full_theta = np.asarray(full_sample["theta_hat"], dtype=float)
+    small_theta = np.asarray(small_firms["theta_hat"], dtype=float)
+    large_theta = np.asarray(large_firms["theta_hat"], dtype=float)
+
+    full_se = np.asarray(full_sample["std_errors"], dtype=float)
+    small_se = np.asarray(small_firms["std_errors"], dtype=float)
+    large_se = np.asarray(large_firms["std_errors"], dtype=float)
+
+    for i, param in enumerate(param_names):
+        rows.append(
+            {
+                "parameter": param,
+                "full_sample_estimate": float(full_theta[i]),
+                "full_sample_std_error": float(full_se[i]),
+                "small_firms_estimate": float(small_theta[i]),
+                "small_firms_std_error": float(small_se[i]),
+                "large_firms_estimate": float(large_theta[i]),
+                "large_firms_std_error": float(large_se[i]),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    if split_info is not None:
+        df.attrs["split_info"] = split_info
+
+    return df
+
+
+def save_subsample_comparison_table(
+    full_sample,
+    small_firms,
+    large_firms,
+    split_info=None,
+    decimals: int = 4,
+):
+    df = make_subsample_comparison_table(
+        full_sample=full_sample,
+        small_firms=small_firms,
+        large_firms=large_firms,
+        split_info=split_info,
+    )
+    return _save_table(df, "subsample_parameter_comparison", decimals=decimals)
