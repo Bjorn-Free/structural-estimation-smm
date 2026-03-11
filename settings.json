@@ -6,7 +6,7 @@
   "raw_data_path": "data/raw/compustat_raw.csv",
   "clean_data_path": "data/clean/compustat_clean.csv",
 
-  "theta0": [0.078389, 4.014213, 0.890673, 0.448149],
+  "theta0": [0.099730, 6.869267, 0.854429, 0.490264],
 
   "bounds": [
     [0.01, 1.0],
@@ -23,6 +23,84 @@
     "xatol": 0.001,
     "fatol": 0.001,
     "adaptive": true
+  },
+
+  "optimizer_diagnostics": {
+    "enabled": false,
+    "diagnostics_only": true,
+
+    "run_baseline_check": false,
+    "compute_standard_errors": false,
+    "make_plots": false,
+
+    "run_budget_sweep": true,
+    "budget_sweep": [
+      {
+        "label": "budget_20_40",
+        "maxiter": 20,
+        "maxfev": 40
+      },
+      {
+        "label": "budget_60_120",
+        "maxiter": 60,
+        "maxfev": 120
+      }
+    ],
+
+    "run_multi_start": true,
+    "multi_start_thetas": [
+      {
+        "label": "start_best_current",
+        "theta0": [0.099730, 6.869267, 0.854429, 0.490264]
+      },
+      {
+        "label": "start_legacy_current",
+        "theta0": [0.078389, 4.014213, 0.890673, 0.448149]
+      }
+    ]
+  },
+
+  "layer3_diagnostics": {
+    "enabled": true,
+    "diagnostics_only": true,
+    "make_plots": false,
+
+    "fixed_theta": [0.099730, 6.869267, 0.854429, 0.490264],
+
+    "scenarios": [
+      {
+        "label": "baseline",
+        "dp_overrides": {
+          "investment_max": 0.50,
+          "k_max": 300.0,
+          "p_max": 60.0
+        }
+      },
+      {
+        "label": "investment_max_0p70",
+        "dp_overrides": {
+          "investment_max": 0.70
+        }
+      },
+      {
+        "label": "investment_max_0p90",
+        "dp_overrides": {
+          "investment_max": 0.90
+        }
+      },
+      {
+        "label": "k_max_500",
+        "dp_overrides": {
+          "k_max": 500.0
+        }
+      },
+      {
+        "label": "p_max_120",
+        "dp_overrides": {
+          "p_max": 120.0
+        }
+      }
+    ]
   },
 
   "n_moments": 9,
