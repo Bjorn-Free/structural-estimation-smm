@@ -61,7 +61,7 @@
   },
 
   "layer3_diagnostics": {
-    "enabled": true,
+    "enabled": false,
     "diagnostics_only": true,
     "make_plots": false,
 
@@ -99,6 +99,64 @@
         "dp_overrides": {
           "p_max": 120.0
         }
+      }
+    ]
+  },
+
+  "layer4_diagnostics": {
+    "enabled": true,
+    "diagnostics_only": true,
+    "make_plots": false,
+    "save_lambda_policy_plot": false,
+
+    "fixed_theta": [0.099730, 6.869267, 0.854429, 0.490264],
+
+    "scenarios": [
+      {
+        "label": "baseline",
+        "theta_overrides": {},
+        "model_overrides": {},
+        "simulation_overrides": {},
+        "dp_overrides": {}
+      },
+      {
+        "label": "initial_cash_ratio_0p20",
+        "theta_overrides": {},
+        "model_overrides": {},
+        "simulation_overrides": {
+          "initial_cash_ratio": 0.20
+        },
+        "dp_overrides": {}
+      },
+      {
+        "label": "cash_return_rate_0p05",
+        "theta_overrides": {},
+        "model_overrides": {
+          "cash_return_rate": 0.05
+        },
+        "simulation_overrides": {},
+        "dp_overrides": {}
+      },
+      {
+        "label": "asset_multiplier_2p0",
+        "theta_overrides": {},
+        "model_overrides": {},
+        "simulation_overrides": {
+          "asset_multiplier": 2.0
+        },
+        "dp_overrides": {}
+      },
+      {
+        "label": "cash_friendly_combo",
+        "theta_overrides": {},
+        "model_overrides": {
+          "cash_return_rate": 0.05
+        },
+        "simulation_overrides": {
+          "initial_cash_ratio": 0.20,
+          "asset_multiplier": 2.0
+        },
+        "dp_overrides": {}
       }
     ]
   },
