@@ -3,11 +3,11 @@
   "validation_mode": "medium",
 
   "run_full_sample": false,
-  "run_small_firms": true,
-  "run_large_firms": false,
+  "run_small_firms": false,
+  "run_large_firms": true,
 
   "save_terminal_output": true,
-  "terminal_output_path": "results/logs/runSMM_small_firms_final.log",
+  "terminal_output_path": "results/logs/runSMM_large_firms_final.log",
 
   "rebuild_data": false,
   "raw_data_path": "data/raw/compustat_raw.csv",
