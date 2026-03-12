@@ -10,15 +10,7 @@ from src.data import build_compustat, load_clean_data
 from src.dp_solver import solve_investment_dp
 from src.model import get_fixed_params
 from src.moments import compute_moments, moment_names
-from src.reporting import (
-    save_summary_statistics_table,
-    save_parameter_table,
-    save_subsample_comparison_table,
-    save_estimation_settings_table,
-    save_identification_detailed_table,
-    save_identification_summary_table,
-    save_overidentification_note_table,
-)
+from src.reporting import save_summary_statistics_table
 from src.simulate import simulate_panel
 from src.diagnostics_plots import (
     plot_investment_policy_heatmap,
@@ -33,51 +25,6 @@ from src.jacobian import smm_standard_errors
 
 TABLE_DIR = Path("results/tables")
 FIGURE_DIR = Path("results/figures")
-
-
-def build_policy_summary_table(solution, theta, label):
-    """
-    Summarize solved policy functions at representative grid points.
-    """
-    theta = np.asarray(theta, dtype=float)
-
-    k_grid = solution["k_grid"]
-    p_grid = solution["p_grid"]
-    z_grid = solution["z_grid"]
-
-    policy_i = solution["policy_investment"]
-    policy_kprime = solution["policy_kprime"]
-    policy_pprime = solution["policy_pprime"]
-
-    k_indices = [0, len(k_grid) // 2, len(k_grid) - 1]
-    p_indices = [0, len(p_grid) // 2, len(p_grid) - 1]
-    z_indices = [0, len(z_grid) // 2, len(z_grid) - 1]
-
-    rows = []
-
-    for ik in k_indices:
-        for ip in p_indices:
-            for iz in z_indices:
-                rows.append(
-                    {
-                        "scenario": label,
-                        "rho": float(theta[2]),
-                        "sigma": float(theta[3]),
-                        "psi": float(theta[0]),
-                        "lambda_external_finance": float(theta[1]),
-                        "k_index": int(ik),
-                        "p_index": int(ip),
-                        "z_index": int(iz),
-                        "k": float(k_grid[ik]),
-                        "cash_state": float(p_grid[ip]),
-                        "z": float(z_grid[iz]),
-                        "investment_policy": float(policy_i[ik, ip, iz]),
-                        "kprime_policy": float(policy_kprime[ik, ip, iz]),
-                        "cash_next_policy": float(policy_pprime[ik, ip, iz]),
-                    }
-                )
-
-    return pd.DataFrame(rows)
 
 
 def print_vector_with_labels(title, labels, values):
@@ -105,7 +52,7 @@ def print_solver_diagnostics(solution):
 
 def estimation_spec(config):
     """
-    Starting point for the derivative-free capped SMM test.
+    Starting point for diagnostics.
     """
     theta0 = np.asarray(config["theta0"], dtype=float)
 
@@ -113,81 +60,6 @@ def estimation_spec(config):
         "label": "four_parameter_smm",
         "theta0": theta0,
     }
-
-
-def save_estimation_results(
-    moment_labels,
-    theta_hat,
-    m_data,
-    m_sim,
-    std_errors=None,
-    prefix="",
-):
-    """
-    Save compact estimation output tables.
-    """
-    TABLE_DIR.mkdir(parents=True, exist_ok=True)
-
-    prefix_str = f"{prefix}_" if prefix else ""
-
-    param_names = [
-        "psi",
-        "lambda_external_finance",
-        "rho",
-        "sigma",
-    ]
-
-    moment_label_map = {
-        "mean_investment": "Mean investment",
-        "var_investment": "Variance investment",
-        "autocorr_investment": "Autocorrelation investment",
-        "mean_profitability": "Mean profitability",
-        "var_profitability": "Variance profitability",
-        "autocorr_profitability": "Autocorrelation profitability",
-        "mean_cash_ratio": "Mean cash ratio",
-        "var_cash_ratio": "Variance cash ratio",
-        "autocorr_cash_ratio": "Autocorrelation cash ratio",
-    }
-    pretty_moment_labels = [moment_label_map.get(x, x) for x in moment_labels]
-
-    param_table = pd.DataFrame(
-        {
-            "parameter": param_names,
-            "estimate": np.asarray(theta_hat, dtype=float),
-        }
-    )
-
-    if std_errors is not None:
-        param_table["std_error"] = np.asarray(std_errors, dtype=float)
-
-    param_csv = TABLE_DIR / f"{prefix_str}smm_parameter_estimates.csv"
-    param_table.to_csv(param_csv, index=False)
-
-    moment_table = pd.DataFrame(
-        {
-            "moment": pretty_moment_labels,
-            "data": np.asarray(m_data, dtype=float),
-            "simulated": np.asarray(m_sim, dtype=float),
-            "gap": np.asarray(m_sim, dtype=float) - np.asarray(m_data, dtype=float),
-            "abs_gap": np.abs(
-                np.asarray(m_sim, dtype=float) - np.asarray(m_data, dtype=float)
-            ),
-        }
-    )
-    moment_csv = TABLE_DIR / f"{prefix_str}smm_moment_fit.csv"
-    moment_table.to_csv(moment_csv, index=False)
-
-    return param_csv, moment_csv, param_table, moment_table
-
-
-def save_policy_table(df, filename):
-    """
-    Save a policy summary table to CSV.
-    """
-    TABLE_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = TABLE_DIR / filename
-    df.to_csv(output_path, index=False)
-    return output_path
 
 
 def save_diagnostic_table(df, filename):
@@ -198,40 +70,6 @@ def save_diagnostic_table(df, filename):
     output_path = TABLE_DIR / filename
     df.to_csv(output_path, index=False)
     return output_path
-
-
-def build_size_tercile_subsamples(df):
-    """
-    Build bottom-tercile and top-tercile size subsamples using total assets.
-
-    The cleaned Compustat file uses the standard Compustat name:
-        at = total assets
-    """
-    if "at" not in df.columns:
-        raise KeyError("The cleaned dataset must contain an 'at' (total assets) column.")
-
-    size_series = pd.to_numeric(df["at"], errors="coerce")
-    valid = df.loc[size_series.notna()].copy()
-    valid["_size_at_for_split"] = pd.to_numeric(valid["at"], errors="coerce")
-
-    q33 = float(valid["_size_at_for_split"].quantile(1.0 / 3.0))
-    q67 = float(valid["_size_at_for_split"].quantile(2.0 / 3.0))
-
-    small_df = valid.loc[valid["_size_at_for_split"] <= q33].copy()
-    large_df = valid.loc[valid["_size_at_for_split"] >= q67].copy()
-
-    small_df = small_df.drop(columns=["_size_at_for_split"])
-    large_df = large_df.drop(columns=["_size_at_for_split"])
-
-    info = {
-        "size_variable": "at",
-        "q33": q33,
-        "q67": q67,
-        "n_small": int(len(small_df)),
-        "n_large": int(len(large_df)),
-    }
-
-    return small_df, large_df, info
 
 
 def _distance_to_bounds(theta, bounds):
@@ -397,20 +235,12 @@ def run_single_estimation(
     config,
     sample_label,
     theta0,
-    save_outputs=True,
     make_plots=False,
     run_baseline_check=True,
     compute_standard_errors=True,
 ):
     """
-    Run one full estimation block on one dataset.
-
-    Fast-diagnostics mode:
-    - run_baseline_check = False
-    - compute_standard_errors = False
-
-    This preserves the main estimation pipeline while avoiding expensive
-    steps that are unnecessary during optimizer / grid debugging.
+    Run one estimation block for diagnostics.
     """
     moment_labels = moment_names(config)
     m_data = compute_moments(df, config)
@@ -541,103 +371,6 @@ def run_single_estimation(
         )
         std_errors = np.asarray(se_results["std_errors"], dtype=float)
 
-    prefix = sample_label.lower().replace(" ", "_")
-
-    saved_paths = {}
-
-    if save_outputs:
-        param_csv, moment_csv, param_table, moment_table = save_estimation_results(
-            moment_labels=moment_labels,
-            theta_hat=theta_hat,
-            m_data=m_data,
-            m_sim=m_sim_hat,
-            std_errors=std_errors,
-            prefix=prefix,
-        )
-
-        pretty_param_df, pretty_param_csv, pretty_param_tex = save_parameter_table(
-            theta_hat=theta_hat,
-            param_names=["psi", "lambda_external_finance", "rho", "sigma"],
-            std_errors=std_errors,
-            decimals=4,
-            filename_stem=f"{prefix}_parameter_estimates",
-        )
-
-        estimated_policy_summary_df = build_policy_summary_table(
-            solution=solution_hat,
-            theta=theta_hat,
-            label=f"{prefix}_estimated_theta_hat",
-        )
-        estimated_policy_csv = save_policy_table(
-            estimated_policy_summary_df,
-            filename=f"{prefix}_estimated_policy_summary.csv",
-        )
-
-        estimation_settings_df, estimation_settings_csv, estimation_settings_tex = (
-            save_estimation_settings_table(
-                config=config_run,
-                objective_value=result["objective_value"],
-                weighting_matrix_name="Efficient SMM",
-                decimals=4,
-                filename_stem=f"{prefix}_estimation_settings",
-                sample_label=sample_label,
-                n_obs=int(len(df)),
-                weighting_details=weighting_details,
-                optimizer_method=config_run.get("smm_optimizer_method", "Nelder-Mead"),
-                optimizer_options=config_run.get("smm_optimizer_options", {}),
-            )
-        )
-
-        identification_detail_df, identification_detail_csv, identification_detail_tex = (
-            save_identification_detailed_table(
-                moment_labels=moment_labels,
-                param_names=["psi", "lambda_external_finance", "rho", "sigma"],
-                jacobian=se_results["jacobian"],
-                decimals=6,
-                filename_stem=f"{prefix}_identification_jacobian",
-            )
-        )
-
-        identification_summary_df, identification_summary_csv, identification_summary_tex = (
-            save_identification_summary_table(
-                moment_labels=moment_labels,
-                param_names=["psi", "lambda_external_finance", "rho", "sigma"],
-                jacobian=se_results["jacobian"],
-                bread_condition_number=se_results["bread_condition_number"],
-                decimals=6,
-                filename_stem=f"{prefix}_identification_summary",
-            )
-        )
-
-        overid_note_df, overid_note_csv, overid_note_tex = save_overidentification_note_table(
-            sample_label=sample_label,
-            n_moments=len(moment_labels),
-            n_params=len(theta_hat),
-            filename_stem=f"{prefix}_overidentification_note",
-            decimals=4,
-        )
-
-        saved_paths = {
-            "param_csv": param_csv,
-            "moment_csv": moment_csv,
-            "pretty_param_csv": pretty_param_csv,
-            "pretty_param_tex": pretty_param_tex,
-            "estimated_policy_csv": estimated_policy_csv,
-            "estimation_settings_csv": estimation_settings_csv,
-            "estimation_settings_tex": estimation_settings_tex,
-            "identification_detail_csv": identification_detail_csv,
-            "identification_detail_tex": identification_detail_tex,
-            "identification_summary_csv": identification_summary_csv,
-            "identification_summary_tex": identification_summary_tex,
-            "overid_note_csv": overid_note_csv,
-            "overid_note_tex": overid_note_tex,
-        }
-    else:
-        param_table = pd.DataFrame()
-        moment_table = pd.DataFrame()
-        pretty_param_df = pd.DataFrame()
-        estimated_policy_summary_df = pd.DataFrame()
-
     return {
         "sample_label": sample_label,
         "n_obs": int(len(df)),
@@ -649,10 +382,6 @@ def run_single_estimation(
         "result": result,
         "solution_hat": solution_hat,
         "se_results": se_results,
-        "param_table": pretty_param_df if save_outputs else param_table,
-        "moment_table": moment_table,
-        "estimated_policy_summary_df": estimated_policy_summary_df,
-        "saved_paths": saved_paths,
         "weighting_details": weighting_details,
     }
 
@@ -704,7 +433,6 @@ def run_optimizer_budget_diagnostics(df, config, theta0):
             config=config_run,
             sample_label=f"diagnostic_{label}",
             theta0=np.asarray(theta0, dtype=float),
-            save_outputs=False,
             make_plots=bool(diag_cfg.get("make_plots", False)),
             run_baseline_check=bool(diag_cfg.get("run_baseline_check", False)),
             compute_standard_errors=bool(diag_cfg.get("compute_standard_errors", False)),
@@ -803,7 +531,6 @@ def run_multistart_diagnostics(df, config):
             config=config,
             sample_label=f"multistart_{label}",
             theta0=theta0,
-            save_outputs=False,
             make_plots=bool(diag_cfg.get("make_plots", False)),
             run_baseline_check=bool(diag_cfg.get("run_baseline_check", False)),
             compute_standard_errors=bool(diag_cfg.get("compute_standard_errors", False)),
@@ -1173,7 +900,7 @@ def main():
 
     df = load_clean_data(config["clean_data_path"])
 
-    summary_df, summary_csv, summary_tex = save_summary_statistics_table(
+    _, summary_csv, summary_tex = save_summary_statistics_table(
         df=df,
         decimals=4,
     )
@@ -1182,7 +909,7 @@ def main():
     theta0 = np.asarray(spec["theta0"], dtype=float)
 
     print("\n========================================")
-    print("DERIVATIVE-FREE CAPPED SMM TEST RUN")
+    print("DIAGNOSTIC RUN")
     print("========================================")
     print(f"Debug mode: {debug_mode}")
     print(f"Validation mode: {validation_mode}")
@@ -1199,11 +926,15 @@ def main():
         f"{config.get('smm_optimizer_options', {})}"
     )
 
+    any_diagnostics_run = False
+
     diag_cfg = config.get("optimizer_diagnostics", {})
     diagnostics_enabled = bool(diag_cfg.get("enabled", False))
-    diagnostics_only = bool(diag_cfg.get("diagnostics_only", False))
 
     if diagnostics_enabled:
+        any_diagnostics_run = True
+        diagnostics_only = bool(diag_cfg.get("diagnostics_only", False))
+
         print("\n========================================")
         print("LAYER 2 OPTIMIZATION DIAGNOSTICS")
         print("========================================")
@@ -1225,18 +956,13 @@ def main():
                 config=config,
             )
 
-        if diagnostics_only:
-            print("\nDiagnostics-only mode enabled. Skipping full sample/subsample estimation.")
-            print(f"Summary statistics CSV: {summary_csv}")
-            print(f"Summary statistics TEX: {summary_tex}")
-            print("\nRun complete.")
-            return
-
     layer3_cfg = config.get("layer3_diagnostics", {})
     layer3_enabled = bool(layer3_cfg.get("enabled", False))
-    layer3_diagnostics_only = bool(layer3_cfg.get("diagnostics_only", False))
 
     if layer3_enabled:
+        any_diagnostics_run = True
+        layer3_diagnostics_only = bool(layer3_cfg.get("diagnostics_only", False))
+
         print("\n========================================")
         print("LAYER 3 GRID / BOUND DIAGNOSTICS")
         print("========================================")
@@ -1248,18 +974,13 @@ def main():
             config=config,
         )
 
-        if layer3_diagnostics_only:
-            print("\nLayer 3 diagnostics-only mode enabled. Skipping full sample/subsample estimation.")
-            print(f"Summary statistics CSV: {summary_csv}")
-            print(f"Summary statistics TEX: {summary_tex}")
-            print("\nRun complete.")
-            return
-
     layer4_cfg = config.get("layer4_diagnostics", {})
     layer4_enabled = bool(layer4_cfg.get("enabled", False))
-    layer4_diagnostics_only = bool(layer4_cfg.get("diagnostics_only", False))
 
     if layer4_enabled:
+        any_diagnostics_run = True
+        layer4_diagnostics_only = bool(layer4_cfg.get("diagnostics_only", False))
+
         print("\n========================================")
         print("LAYER 4 STRUCTURAL DIAGNOSTICS")
         print("========================================")
@@ -1271,96 +992,14 @@ def main():
             config=config,
         )
 
-        if layer4_diagnostics_only:
-            print("\nLayer 4 diagnostics-only mode enabled. Skipping full sample/subsample estimation.")
-            print(f"Summary statistics CSV: {summary_csv}")
-            print(f"Summary statistics TEX: {summary_tex}")
-            print("\nRun complete.")
-            return
+    if not any_diagnostics_run:
+        print("\nNo diagnostics blocks are enabled in settings.json.")
+        print("Nothing to run.")
+        return
 
-    full_results = run_single_estimation(
-        df=df,
-        config=config,
-        sample_label="full_sample",
-        theta0=theta0,
-        save_outputs=True,
-        make_plots=True,
-        run_baseline_check=True,
-        compute_standard_errors=True,
-    )
-
-    small_df, large_df, split_info = build_size_tercile_subsamples(df)
-
-    print("\n========================================")
-    print("SIZE TERCILE SUBSAMPLES")
-    print("========================================")
-    print(f"Size variable: {split_info['size_variable']}")
-    print(f"33rd percentile: {split_info['q33']:.6f}")
-    print(f"67th percentile: {split_info['q67']:.6f}")
-    print(f"Small-firm observations: {split_info['n_small']}")
-    print(f"Large-firm observations: {split_info['n_large']}")
-
-    small_results = run_single_estimation(
-        df=small_df,
-        config=config,
-        sample_label="small_firms",
-        theta0=theta0,
-        save_outputs=True,
-        make_plots=False,
-        run_baseline_check=True,
-        compute_standard_errors=True,
-    )
-
-    large_results = run_single_estimation(
-        df=large_df,
-        config=config,
-        sample_label="large_firms",
-        theta0=theta0,
-        save_outputs=True,
-        make_plots=False,
-        run_baseline_check=True,
-        compute_standard_errors=True,
-    )
-
-    subsample_comparison_df, subsample_comparison_csv, subsample_comparison_tex = (
-        save_subsample_comparison_table(
-            full_sample=full_results,
-            small_firms=small_results,
-            large_firms=large_results,
-            split_info=split_info,
-            decimals=4,
-        )
-    )
-
-    print("\n========================================")
-    print("SUBSAMPLE PARAMETER COMPARISON TABLE")
-    print("========================================")
-    print(subsample_comparison_df.to_string(index=False))
-
-    print("\n========================================")
-    print("SUMMARY STATISTICS TABLE")
-    print("========================================")
-    print(summary_df.to_string(index=False))
-
-    print("\n========================================")
-    print("FILES SAVED")
-    print("========================================")
-    print(f"Summary statistics CSV: {summary_csv}")
-    print(f"Summary statistics TEX: {summary_tex}")
-
-    for label, results_dict in [
-        ("Full sample", full_results),
-        ("Small firms", small_results),
-        ("Large firms", large_results),
-    ]:
-        print(f"\n{label}")
-        for key, value in results_dict["saved_paths"].items():
-            print(f"  {key}: {value}")
-
-    print(f"\nSubsample comparison CSV: {subsample_comparison_csv}")
-    print(f"Subsample comparison TEX: {subsample_comparison_tex}")
-
-    print("\nRun complete.")
+    print("\nSummary statistics CSV:", summary_csv)
+    print("Summary statistics TEX:", summary_tex)
+    print("\nDiagnostic run complete.")
 
 
 if __name__ == "__main__":

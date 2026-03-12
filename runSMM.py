@@ -1,9 +1,11 @@
 from pathlib import Path
 import copy
+import sys
+import time
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 from src.config import load_config
 from src.data import build_compustat, load_clean_data
@@ -32,7 +34,99 @@ from src.jacobian import smm_standard_errors
 
 
 TABLE_DIR = Path("results/tables")
-FIGURE_DIR = Path("results/figures")
+LOG_DIR = Path("results/logs")
+
+
+class Tee:
+    """
+    Duplicate writes to multiple streams.
+    Useful for saving terminal output to a log file while still printing live.
+    """
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+def timestamp_now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_seconds(seconds):
+    seconds = float(seconds)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hours:d}h {minutes:02d}m {secs:05.2f}s"
+
+
+def print_section(title):
+    print("\n========================================")
+    print(title)
+    print("========================================")
+
+
+def print_step(title):
+    print("\n----------------------------------------")
+    print(title)
+    print("----------------------------------------")
+
+
+def setup_logging(config):
+    """
+    Optionally duplicate stdout/stderr to a log file.
+    Returns:
+        log_file_handle, original_stdout, original_stderr
+    """
+    save_terminal_output = bool(config.get("save_terminal_output", False))
+    terminal_output_path = config.get(
+        "terminal_output_path",
+        f"results/logs/runSMM_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
+    )
+
+    if not save_terminal_output:
+        return None, None, None
+
+    log_path = Path(terminal_output_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    log_file = open(log_path, "w", encoding="utf-8")
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+
+    sys.stdout = Tee(original_stdout, log_file)
+    sys.stderr = Tee(original_stderr, log_file)
+
+    print_section("LOGGING ENABLED")
+    print(f"Timestamp: {timestamp_now()}")
+    print(f"Terminal output is also being saved to: {log_path}")
+
+    return log_file, original_stdout, original_stderr
+
+
+def teardown_logging(log_file, original_stdout, original_stderr):
+    """
+    Restore stdout/stderr if logging was enabled.
+    """
+    if log_file is None:
+        return
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    sys.stdout = original_stdout
+    sys.stderr = original_stderr
+
+    log_file.close()
 
 
 def build_policy_summary_table(solution, theta, label):
@@ -105,7 +199,7 @@ def print_solver_diagnostics(solution):
 
 def estimation_spec(config):
     """
-    Starting point for the derivative-free capped SMM test.
+    Starting point for the derivative-free SMM run.
     """
     theta0 = np.asarray(config["theta0"], dtype=float)
 
@@ -190,22 +284,16 @@ def save_policy_table(df, filename):
     return output_path
 
 
-def save_diagnostic_table(df, filename):
-    """
-    Save a generic diagnostics table to CSV.
-    """
-    TABLE_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = TABLE_DIR / filename
-    df.to_csv(output_path, index=False)
-    return output_path
-
-
 def build_size_tercile_subsamples(df):
     """
     Build bottom-tercile and top-tercile size subsamples using total assets.
 
     The cleaned Compustat file uses the standard Compustat name:
         at = total assets
+
+    Important:
+    This is an observation-level split by firm-year total assets, not a
+    permanent firm-level tercile classification.
     """
     if "at" not in df.columns:
         raise KeyError("The cleaned dataset must contain an 'at' (total assets) column.")
@@ -234,164 +322,6 @@ def build_size_tercile_subsamples(df):
     return small_df, large_df, info
 
 
-def _distance_to_bounds(theta, bounds):
-    """
-    Compute distance of each parameter to its lower and upper bounds.
-    """
-    theta = np.asarray(theta, dtype=float)
-
-    rows = []
-    for i, (value, bound) in enumerate(zip(theta, bounds)):
-        lower = float(bound[0])
-        upper = float(bound[1])
-        rows.append(
-            {
-                "param_index": i,
-                "theta_value": float(value),
-                "lower_bound": lower,
-                "upper_bound": upper,
-                "distance_to_lower": float(value - lower),
-                "distance_to_upper": float(upper - value),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def _build_optimizer_options(base_config, maxiter=None, maxfev=None):
-    """
-    Build optimizer options from the base config, overriding maxiter/maxfev.
-    """
-    options = copy.deepcopy(base_config.get("smm_optimizer_options", {}))
-
-    if maxiter is not None:
-        options["maxiter"] = int(maxiter)
-    if maxfev is not None:
-        options["maxfev"] = int(maxfev)
-
-    return options
-
-
-def _blank_se_results(n_params, n_moments):
-    """
-    Placeholder standard-error results for fast diagnostics.
-    """
-    return {
-        "jacobian": np.full((n_moments, n_params), np.nan, dtype=float),
-        "vcov": np.full((n_params, n_params), np.nan, dtype=float),
-        "std_errors": np.full(n_params, np.nan, dtype=float),
-        "t_stats": np.full(n_params, np.nan, dtype=float),
-        "simulation_to_data_ratio": np.nan,
-        "simulation_adjustment": np.nan,
-        "bread": np.full((n_params, n_params), np.nan, dtype=float),
-        "bread_condition_number": np.nan,
-    }
-
-
-def _apply_dp_overrides(config, dp_overrides=None):
-    """
-    Return a copy of config with selected dp settings overridden.
-    """
-    config_run = copy.deepcopy(config)
-    if dp_overrides:
-        config_run.setdefault("dp", {})
-        for key, value in dp_overrides.items():
-            config_run["dp"][key] = value
-    return config_run
-
-
-def _apply_model_overrides(config, model_overrides=None):
-    """
-    Return a copy of config with selected model settings overridden.
-    """
-    config_run = copy.deepcopy(config)
-    if model_overrides:
-        config_run.setdefault("model", {})
-        for key, value in model_overrides.items():
-            config_run["model"][key] = value
-    return config_run
-
-
-def _apply_simulation_overrides(config, simulation_overrides=None):
-    """
-    Return a copy of config with selected simulation settings overridden.
-    """
-    config_run = copy.deepcopy(config)
-    if simulation_overrides:
-        config_run.setdefault("simulation", {})
-        for key, value in simulation_overrides.items():
-            config_run["simulation"][key] = value
-    return config_run
-
-
-def _apply_theta_overrides(theta, theta_overrides=None):
-    """
-    Return a copy of theta with named overrides applied.
-    """
-    theta_run = np.asarray(theta, dtype=float).copy()
-
-    if not theta_overrides:
-        return theta_run
-
-    index_map = {
-        "psi": 0,
-        "lambda_external_finance": 1,
-        "lam": 1,
-        "rho": 2,
-        "sigma": 3,
-    }
-
-    for key, value in theta_overrides.items():
-        if key not in index_map:
-            raise KeyError(
-                f"Unknown theta override '{key}'. "
-                f"Allowed keys: {list(index_map.keys())}"
-            )
-        theta_run[index_map[key]] = float(value)
-
-    return theta_run
-
-
-def save_layer4_policy_plot(policy_rows, filename="layer4_policy_comparison.png"):
-    """
-    Save a comparison plot of investment policy against cash state across
-    Layer 4 scenarios at representative (k, z).
-    """
-    if not policy_rows:
-        return None
-
-    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-    df_plot = pd.DataFrame(policy_rows)
-
-    plt.figure(figsize=(8, 6))
-
-    for scenario_label, subdf in df_plot.groupby("scenario_label"):
-        subdf = subdf.sort_values("cash_state")
-        plt.plot(
-            subdf["cash_state"].to_numpy(dtype=float),
-            subdf["investment_policy"].to_numpy(dtype=float),
-            label=str(scenario_label),
-        )
-
-    rep_k = float(df_plot["representative_k"].iloc[0])
-    rep_z = float(df_plot["representative_z"].iloc[0])
-
-    plt.xlabel("Cash state")
-    plt.ylabel("Investment policy")
-    plt.title(
-        "Investment Policy vs Cash Across Layer 4 Scenarios\n"
-        f"(representative k = {rep_k:.2f}, z = {rep_z:.2f})"
-    )
-    plt.legend()
-    plt.tight_layout()
-
-    output_path = FIGURE_DIR / filename
-    plt.savefig(output_path, dpi=300)
-    plt.close()
-
-    print(f"Saved Layer 4 policy comparison plot: {output_path}")
-    return output_path
-
-
 def run_single_estimation(
     df,
     config,
@@ -399,28 +329,20 @@ def run_single_estimation(
     theta0,
     save_outputs=True,
     make_plots=False,
-    run_baseline_check=True,
-    compute_standard_errors=True,
 ):
     """
     Run one full estimation block on one dataset.
-
-    Fast-diagnostics mode:
-    - run_baseline_check = False
-    - compute_standard_errors = False
-
-    This preserves the main estimation pipeline while avoiding expensive
-    steps that are unnecessary during optimizer / grid debugging.
     """
+    sample_start = time.perf_counter()
+
     moment_labels = moment_names(config)
     m_data = compute_moments(df, config)
 
     config_run = copy.deepcopy(config)
     config_run["theta0"] = np.asarray(theta0, dtype=float).tolist()
 
-    print("\n========================================")
-    print(f"RUNNING SAMPLE: {sample_label}")
-    print("========================================")
+    print_section(f"RUNNING SAMPLE: {sample_label}")
+    print(f"Timestamp: {timestamp_now()}")
     print(f"Sample observations: {len(df)}")
 
     print_vector_with_labels(
@@ -429,29 +351,30 @@ def run_single_estimation(
         values=m_data,
     )
 
-    if run_baseline_check:
-        fixed_params_run = get_fixed_params(config_run, theta=theta0)
+    fixed_params_run = get_fixed_params(config_run, theta=theta0)
 
-        print("\n----------------------------------------")
-        print(f"{sample_label} baseline DP check")
-        print("----------------------------------------")
+    print_step(f"{sample_label} baseline DP check")
+    baseline_start = time.perf_counter()
 
-        baseline_solution = solve_investment_dp(
-            theta=np.asarray(theta0, dtype=float),
-            config=config_run,
-            fixed_params=fixed_params_run,
-        )
+    baseline_solution = solve_investment_dp(
+        theta=np.asarray(theta0, dtype=float),
+        config=config_run,
+        fixed_params=fixed_params_run,
+    )
 
-        baseline_sim_df = simulate_panel(theta0, config_run, solution=baseline_solution)
-        _ = compute_moments(baseline_sim_df, config_run)
+    baseline_sim_df = simulate_panel(theta0, config_run, solution=baseline_solution)
+    _ = compute_moments(baseline_sim_df, config_run)
 
-        if make_plots:
-            plot_investment_policy_heatmap(baseline_solution)
-            plot_capital_distribution(baseline_sim_df)
+    if make_plots:
+        plot_investment_policy_heatmap(baseline_solution)
+        plot_capital_distribution(baseline_sim_df)
 
-        print_solver_diagnostics(baseline_solution)
-    else:
-        print("\nBaseline DP check skipped for fast diagnostics.")
+    print_solver_diagnostics(baseline_solution)
+    baseline_elapsed = time.perf_counter() - baseline_start
+    print(f"Baseline block elapsed time: {format_seconds(baseline_elapsed)}")
+
+    print_step(f"{sample_label} weighting matrix")
+    weighting_start = time.perf_counter()
 
     W, weighting_details = make_weighting_matrix(
         df=df,
@@ -464,11 +387,13 @@ def run_single_estimation(
     print(f"  condition_number         {weighting_details['condition_number']:.6e}")
     print(f"  used_pinv                {weighting_details['used_pinv']}")
 
+    weighting_elapsed = time.perf_counter() - weighting_start
+    print(f"Weighting matrix elapsed time: {format_seconds(weighting_elapsed)}")
+
     bounds = config_run["bounds"]
 
-    print("\n----------------------------------------")
-    print(f"{sample_label} SMM estimation")
-    print("----------------------------------------")
+    print_step(f"{sample_label} SMM estimation")
+    estimation_start = time.perf_counter()
 
     result = estimate_smm(
         theta0=np.asarray(theta0, dtype=float),
@@ -477,6 +402,9 @@ def run_single_estimation(
         W=W,
         config=config_run,
     )
+
+    estimation_elapsed = time.perf_counter() - estimation_start
+    print(f"SMM estimation elapsed time: {format_seconds(estimation_elapsed)}")
 
     theta_hat = np.asarray(result["theta_hat"], dtype=float)
     m_sim_hat = np.asarray(result["m_sim"], dtype=float)
@@ -513,39 +441,38 @@ def run_single_estimation(
     print("\nEstimated-parameter DP diagnostics")
     print_solver_diagnostics(solution_hat)
 
-    if compute_standard_errors:
-        print("\nComputing standard errors")
-        se_results = smm_standard_errors(
-            theta_hat=theta_hat,
-            W=W,
-            df=df,
-            config=config_run,
-        )
-        std_errors = np.asarray(se_results["std_errors"], dtype=float)
+    print_step(f"{sample_label} standard errors")
+    se_start = time.perf_counter()
 
-        print("Standard error diagnostics")
-        print(
-            f"  simulation_to_data_ratio {se_results['simulation_to_data_ratio']:.6f}"
-        )
-        print(
-            f"  simulation_adjustment    {se_results['simulation_adjustment']:.6f}"
-        )
-        print(
-            f"  bread_condition_number   {se_results['bread_condition_number']:.6e}"
-        )
-    else:
-        print("\nStandard errors skipped for fast diagnostics.")
-        se_results = _blank_se_results(
-            n_params=len(theta_hat),
-            n_moments=len(moment_labels),
-        )
-        std_errors = np.asarray(se_results["std_errors"], dtype=float)
+    se_results = smm_standard_errors(
+        theta_hat=theta_hat,
+        W=W,
+        df=df,
+        config=config_run,
+    )
+    std_errors = np.asarray(se_results["std_errors"], dtype=float)
+
+    print("Standard error diagnostics")
+    print(
+        f"  simulation_to_data_ratio {se_results['simulation_to_data_ratio']:.6f}"
+    )
+    print(
+        f"  simulation_adjustment    {se_results['simulation_adjustment']:.6f}"
+    )
+    print(
+        f"  bread_condition_number   {se_results['bread_condition_number']:.6e}"
+    )
+
+    se_elapsed = time.perf_counter() - se_start
+    print(f"Standard errors elapsed time: {format_seconds(se_elapsed)}")
 
     prefix = sample_label.lower().replace(" ", "_")
-
     saved_paths = {}
 
     if save_outputs:
+        print_step(f"{sample_label} save outputs")
+        output_start = time.perf_counter()
+
         param_csv, moment_csv, param_table, moment_table = save_estimation_results(
             moment_labels=moment_labels,
             theta_hat=theta_hat,
@@ -573,7 +500,7 @@ def run_single_estimation(
             filename=f"{prefix}_estimated_policy_summary.csv",
         )
 
-        estimation_settings_df, estimation_settings_csv, estimation_settings_tex = (
+        _, estimation_settings_csv, estimation_settings_tex = (
             save_estimation_settings_table(
                 config=config_run,
                 objective_value=result["objective_value"],
@@ -588,7 +515,7 @@ def run_single_estimation(
             )
         )
 
-        identification_detail_df, identification_detail_csv, identification_detail_tex = (
+        _, identification_detail_csv, identification_detail_tex = (
             save_identification_detailed_table(
                 moment_labels=moment_labels,
                 param_names=["psi", "lambda_external_finance", "rho", "sigma"],
@@ -598,7 +525,7 @@ def run_single_estimation(
             )
         )
 
-        identification_summary_df, identification_summary_csv, identification_summary_tex = (
+        _, identification_summary_csv, identification_summary_tex = (
             save_identification_summary_table(
                 moment_labels=moment_labels,
                 param_names=["psi", "lambda_external_finance", "rho", "sigma"],
@@ -609,7 +536,7 @@ def run_single_estimation(
             )
         )
 
-        overid_note_df, overid_note_csv, overid_note_tex = save_overidentification_note_table(
+        _, overid_note_csv, overid_note_tex = save_overidentification_note_table(
             sample_label=sample_label,
             n_moments=len(moment_labels),
             n_params=len(theta_hat),
@@ -632,11 +559,20 @@ def run_single_estimation(
             "overid_note_csv": overid_note_csv,
             "overid_note_tex": overid_note_tex,
         }
+
+        output_elapsed = time.perf_counter() - output_start
+        print(f"Output-saving elapsed time: {format_seconds(output_elapsed)}")
     else:
         param_table = pd.DataFrame()
         moment_table = pd.DataFrame()
         pretty_param_df = pd.DataFrame()
         estimated_policy_summary_df = pd.DataFrame()
+
+    sample_elapsed = time.perf_counter() - sample_start
+
+    print_section(f"FINISHED SAMPLE: {sample_label}")
+    print(f"Timestamp: {timestamp_now()}")
+    print(f"Total sample elapsed time: {format_seconds(sample_elapsed)}")
 
     return {
         "sample_label": sample_label,
@@ -653,714 +589,216 @@ def run_single_estimation(
         "moment_table": moment_table,
         "estimated_policy_summary_df": estimated_policy_summary_df,
         "saved_paths": saved_paths,
-        "weighting_details": weighting_details,
+        "elapsed_seconds": sample_elapsed,
     }
 
 
-def run_optimizer_budget_diagnostics(df, config, theta0):
-    """
-    Run optimizer-budget sensitivity diagnostics on the full sample.
-    """
-    diag_cfg = config.get("optimizer_diagnostics", {})
-    budgets = diag_cfg.get("budget_sweep", [])
-
-    if not budgets:
-        print("\nNo optimizer budget sweep configurations found.")
-        return pd.DataFrame(), None
-
-    rows = []
-    moment_labels = moment_names(config)
-
-    for budget in budgets:
-        label = str(budget.get("label", "budget"))
-        maxiter = int(
-            budget.get(
-                "maxiter",
-                config.get("smm_optimizer_options", {}).get("maxiter", 20),
-            )
-        )
-        maxfev = int(
-            budget.get(
-                "maxfev",
-                config.get("smm_optimizer_options", {}).get("maxfev", 40),
-            )
-        )
-
-        config_run = copy.deepcopy(config)
-        config_run["smm_optimizer_options"] = _build_optimizer_options(
-            base_config=config,
-            maxiter=maxiter,
-            maxfev=maxfev,
-        )
-
-        print("\n========================================")
-        print(f"OPTIMIZER BUDGET DIAGNOSTIC: {label}")
-        print("========================================")
-        print(f"maxiter = {maxiter}")
-        print(f"maxfev  = {maxfev}")
-
-        results = run_single_estimation(
-            df=df,
-            config=config_run,
-            sample_label=f"diagnostic_{label}",
-            theta0=np.asarray(theta0, dtype=float),
-            save_outputs=False,
-            make_plots=bool(diag_cfg.get("make_plots", False)),
-            run_baseline_check=bool(diag_cfg.get("run_baseline_check", False)),
-            compute_standard_errors=bool(diag_cfg.get("compute_standard_errors", False)),
-        )
-
-        theta_hat = np.asarray(results["theta_hat"], dtype=float)
-        bounds = config_run["bounds"]
-        bound_dist = _distance_to_bounds(theta_hat, bounds)
-
-        row = {
-            "diagnostic_label": label,
-            "theta0_psi": float(theta0[0]),
-            "theta0_lambda": float(theta0[1]),
-            "theta0_rho": float(theta0[2]),
-            "theta0_sigma": float(theta0[3]),
-            "maxiter": maxiter,
-            "maxfev": maxfev,
-            "success": bool(results["result"]["success"]),
-            "message": str(results["result"]["message"]),
-            "objective_initial": float(results["result"]["objective_initial"]),
-            "objective_value": float(results["result"]["objective_value"]),
-            "objective_improvement": float(results["result"]["objective_improvement"]),
-            "n_iter": int(results["result"]["n_iter"]),
-            "n_fun_eval": int(results["result"]["n_fun_eval"]),
-            "psi_hat": float(theta_hat[0]),
-            "lambda_hat": float(theta_hat[1]),
-            "rho_hat": float(theta_hat[2]),
-            "sigma_hat": float(theta_hat[3]),
-            "psi_se": float(results["std_errors"][0]) if np.isfinite(results["std_errors"][0]) else np.nan,
-            "lambda_se": float(results["std_errors"][1]) if np.isfinite(results["std_errors"][1]) else np.nan,
-            "rho_se": float(results["std_errors"][2]) if np.isfinite(results["std_errors"][2]) else np.nan,
-            "sigma_se": float(results["std_errors"][3]) if np.isfinite(results["std_errors"][3]) else np.nan,
-            "bread_condition_number": float(results["se_results"]["bread_condition_number"])
-            if np.isfinite(results["se_results"]["bread_condition_number"])
-            else np.nan,
-            "dp_converged": bool(results["solution_hat"]["converged"]),
-            "dp_iterations": int(results["solution_hat"]["n_iter"]),
-            "dp_bellman_sup_norm": float(results["solution_hat"]["max_diff"]),
-            "share_lower_bound": float(results["solution_hat"]["share_lower_bound"]),
-            "share_upper_bound": float(results["solution_hat"]["share_upper_bound"]),
-            "share_any_bound": float(results["solution_hat"]["share_any_bound"]),
-            "share_interior": float(results["solution_hat"]["share_interior"]),
-            "psi_distance_to_lower": float(bound_dist.loc[0, "distance_to_lower"]),
-            "psi_distance_to_upper": float(bound_dist.loc[0, "distance_to_upper"]),
-            "lambda_distance_to_lower": float(bound_dist.loc[1, "distance_to_lower"]),
-            "lambda_distance_to_upper": float(bound_dist.loc[1, "distance_to_upper"]),
-            "rho_distance_to_lower": float(bound_dist.loc[2, "distance_to_lower"]),
-            "rho_distance_to_upper": float(bound_dist.loc[2, "distance_to_upper"]),
-            "sigma_distance_to_lower": float(bound_dist.loc[3, "distance_to_lower"]),
-            "sigma_distance_to_upper": float(bound_dist.loc[3, "distance_to_upper"]),
-            "mean_abs_gap": float(np.mean(np.abs(results["m_sim_hat"] - results["m_data"]))),
-            "max_abs_gap": float(np.max(np.abs(results["m_sim_hat"] - results["m_data"]))),
-        }
-
-        for name, sim_val, data_val in zip(moment_labels, results["m_sim_hat"], results["m_data"]):
-            row[f"sim_{name}"] = float(sim_val)
-            row[f"data_{name}"] = float(data_val)
-            row[f"gap_{name}"] = float(sim_val - data_val)
-
-        rows.append(row)
-
-    df_diag = pd.DataFrame(rows)
-    output_path = save_diagnostic_table(df_diag, "optimizer_budget_diagnostics.csv")
-
-    print("\nSaved optimizer budget diagnostics:")
-    print(output_path)
-
-    return df_diag, output_path
-
-
-def run_multistart_diagnostics(df, config):
-    """
-    Run multi-start optimization diagnostics on the full sample.
-    """
-    diag_cfg = config.get("optimizer_diagnostics", {})
-    starts = diag_cfg.get("multi_start_thetas", [])
-
-    if not starts:
-        print("\nNo multi-start configurations found.")
-        return pd.DataFrame(), None
-
-    rows = []
-    moment_labels = moment_names(config)
-
-    for start in starts:
-        label = str(start.get("label", "start"))
-        theta0 = np.asarray(start.get("theta0", config["theta0"]), dtype=float)
-
-        print("\n========================================")
-        print(f"MULTI-START DIAGNOSTIC: {label}")
-        print("========================================")
-        print(f"theta0 = {theta0}")
-
-        results = run_single_estimation(
-            df=df,
-            config=config,
-            sample_label=f"multistart_{label}",
-            theta0=theta0,
-            save_outputs=False,
-            make_plots=bool(diag_cfg.get("make_plots", False)),
-            run_baseline_check=bool(diag_cfg.get("run_baseline_check", False)),
-            compute_standard_errors=bool(diag_cfg.get("compute_standard_errors", False)),
-        )
-
-        theta_hat = np.asarray(results["theta_hat"], dtype=float)
-        bounds = config["bounds"]
-        bound_dist = _distance_to_bounds(theta_hat, bounds)
-
-        row = {
-            "diagnostic_label": label,
-            "theta0_psi": float(theta0[0]),
-            "theta0_lambda": float(theta0[1]),
-            "theta0_rho": float(theta0[2]),
-            "theta0_sigma": float(theta0[3]),
-            "success": bool(results["result"]["success"]),
-            "message": str(results["result"]["message"]),
-            "objective_initial": float(results["result"]["objective_initial"]),
-            "objective_value": float(results["result"]["objective_value"]),
-            "objective_improvement": float(results["result"]["objective_improvement"]),
-            "n_iter": int(results["result"]["n_iter"]),
-            "n_fun_eval": int(results["result"]["n_fun_eval"]),
-            "psi_hat": float(theta_hat[0]),
-            "lambda_hat": float(theta_hat[1]),
-            "rho_hat": float(theta_hat[2]),
-            "sigma_hat": float(theta_hat[3]),
-            "psi_se": float(results["std_errors"][0]) if np.isfinite(results["std_errors"][0]) else np.nan,
-            "lambda_se": float(results["std_errors"][1]) if np.isfinite(results["std_errors"][1]) else np.nan,
-            "rho_se": float(results["std_errors"][2]) if np.isfinite(results["std_errors"][2]) else np.nan,
-            "sigma_se": float(results["std_errors"][3]) if np.isfinite(results["std_errors"][3]) else np.nan,
-            "bread_condition_number": float(results["se_results"]["bread_condition_number"])
-            if np.isfinite(results["se_results"]["bread_condition_number"])
-            else np.nan,
-            "dp_converged": bool(results["solution_hat"]["converged"]),
-            "dp_iterations": int(results["solution_hat"]["n_iter"]),
-            "dp_bellman_sup_norm": float(results["solution_hat"]["max_diff"]),
-            "share_lower_bound": float(results["solution_hat"]["share_lower_bound"]),
-            "share_upper_bound": float(results["solution_hat"]["share_upper_bound"]),
-            "share_any_bound": float(results["solution_hat"]["share_any_bound"]),
-            "share_interior": float(results["solution_hat"]["share_interior"]),
-            "psi_distance_to_lower": float(bound_dist.loc[0, "distance_to_lower"]),
-            "psi_distance_to_upper": float(bound_dist.loc[0, "distance_to_upper"]),
-            "lambda_distance_to_lower": float(bound_dist.loc[1, "distance_to_lower"]),
-            "lambda_distance_to_upper": float(bound_dist.loc[1, "distance_to_upper"]),
-            "rho_distance_to_lower": float(bound_dist.loc[2, "distance_to_lower"]),
-            "rho_distance_to_upper": float(bound_dist.loc[2, "distance_to_upper"]),
-            "sigma_distance_to_lower": float(bound_dist.loc[3, "distance_to_lower"]),
-            "sigma_distance_to_upper": float(bound_dist.loc[3, "distance_to_upper"]),
-            "mean_abs_gap": float(np.mean(np.abs(results["m_sim_hat"] - results["m_data"]))),
-            "max_abs_gap": float(np.max(np.abs(results["m_sim_hat"] - results["m_data"]))),
-        }
-
-        for name, sim_val, data_val in zip(moment_labels, results["m_sim_hat"], results["m_data"]):
-            row[f"sim_{name}"] = float(sim_val)
-            row[f"data_{name}"] = float(data_val)
-            row[f"gap_{name}"] = float(sim_val - data_val)
-
-        rows.append(row)
-
-    df_diag = pd.DataFrame(rows)
-    output_path = save_diagnostic_table(df_diag, "optimizer_multistart_diagnostics.csv")
-
-    print("\nSaved multi-start diagnostics:")
-    print(output_path)
-
-    return df_diag, output_path
-
-
-def run_layer3_fixed_theta_diagnostics(df, config):
-    """
-    Fast Layer 3 diagnostics:
-    hold theta fixed and vary grid / bound settings without re-optimizing.
-    """
-    layer3_cfg = config.get("layer3_diagnostics", {})
-    scenarios = layer3_cfg.get("scenarios", [])
-    fixed_theta = np.asarray(layer3_cfg.get("fixed_theta", config["theta0"]), dtype=float)
-    make_plots = bool(layer3_cfg.get("make_plots", False))
-
-    if not scenarios:
-        print("\nNo Layer 3 scenarios found.")
-        return pd.DataFrame(), None
-
-    rows = []
-    moment_labels = moment_names(config)
-    m_data = compute_moments(df, config)
-
-    for scenario in scenarios:
-        label = str(scenario.get("label", "scenario"))
-        dp_overrides = scenario.get("dp_overrides", {})
-
-        config_run = _apply_dp_overrides(config, dp_overrides=dp_overrides)
-        fixed_params_run = get_fixed_params(config_run, theta=fixed_theta)
-
-        print("\n========================================")
-        print(f"LAYER 3 FIXED-THETA DIAGNOSTIC: {label}")
-        print("========================================")
-        print(f"theta = {fixed_theta}")
-        print(f"dp_overrides = {dp_overrides}")
-
-        solution = solve_investment_dp(
-            theta=fixed_theta,
-            config=config_run,
-            fixed_params=fixed_params_run,
-        )
-
-        sim_df = simulate_panel(fixed_theta, config_run, solution=solution)
-        m_sim = compute_moments(sim_df, config_run)
-
-        if make_plots:
-            plot_investment_policy_heatmap(solution)
-            plot_capital_distribution(sim_df)
-
-        print_solver_diagnostics(solution)
-        print_vector_with_labels(
-            title=f"{label} simulated moments",
-            labels=moment_labels,
-            values=m_sim,
-        )
-        print_vector_with_labels(
-            title=f"{label} moment gaps (simulated - data)",
-            labels=moment_labels,
-            values=(m_sim - m_data),
-        )
-
-        row = {
-            "scenario_label": label,
-            "psi": float(fixed_theta[0]),
-            "lambda_external_finance": float(fixed_theta[1]),
-            "rho": float(fixed_theta[2]),
-            "sigma": float(fixed_theta[3]),
-            "k_max": float(config_run["dp"]["k_max"]),
-            "p_max": float(config_run["dp"]["p_max"]),
-            "investment_max": float(config_run["dp"]["investment_max"]),
-            "investment_min": float(config_run["dp"]["investment_min"]),
-            "k_grid_size": int(config_run["dp"]["k_grid_size"]),
-            "p_grid_size": int(config_run["dp"]["p_grid_size"]),
-            "z_grid_size": int(config_run["dp"]["z_grid_size"]),
-            "control_grid_size": int(config_run["dp"]["control_grid_size"]),
-            "cash_control_grid_size": int(config_run["dp"]["cash_control_grid_size"]),
-            "fixed_cost": float(config_run["model"]["fixed_cost"]),
-            "production_scale": float(config_run["model"]["production_scale"]),
-            "alpha": float(config_run["model"]["alpha"]),
-            "delta": float(config_run["model"]["delta"]),
-            "cash_return_rate": float(config_run["model"]["cash_return_rate"]),
-            "dp_converged": bool(solution["converged"]),
-            "dp_iterations": int(solution["n_iter"]),
-            "dp_bellman_sup_norm": float(solution["max_diff"]),
-            "share_lower_bound": float(solution["share_lower_bound"]),
-            "share_upper_bound": float(solution["share_upper_bound"]),
-            "share_any_bound": float(solution["share_any_bound"]),
-            "share_interior": float(solution["share_interior"]),
-            "mean_abs_gap": float(np.mean(np.abs(m_sim - m_data))),
-            "max_abs_gap": float(np.max(np.abs(m_sim - m_data))),
-        }
-
-        for name, sim_val, data_val in zip(moment_labels, m_sim, m_data):
-            row[f"sim_{name}"] = float(sim_val)
-            row[f"data_{name}"] = float(data_val)
-            row[f"gap_{name}"] = float(sim_val - data_val)
-
-        rows.append(row)
-
-    df_diag = pd.DataFrame(rows)
-    output_path = save_diagnostic_table(df_diag, "layer3_fixed_theta_diagnostics.csv")
-
-    print("\nSaved Layer 3 fixed-theta diagnostics:")
-    print(output_path)
-
-    return df_diag, output_path
-
-
-def run_layer4_structural_diagnostics(df, config):
-    """
-    Fast Layer 4 diagnostics:
-    hold the estimation problem fixed, but vary structural ingredients
-    without re-optimizing.
-
-    This version supports:
-    - theta overrides
-    - model overrides
-    - simulation overrides
-    - dp overrides
-    """
-    layer4_cfg = config.get("layer4_diagnostics", {})
-    scenarios = layer4_cfg.get("scenarios", [])
-    base_theta = np.asarray(layer4_cfg.get("fixed_theta", config["theta0"]), dtype=float)
-    make_plots = bool(layer4_cfg.get("make_plots", False))
-    save_policy_plot = bool(
-        layer4_cfg.get("save_policy_plot", layer4_cfg.get("save_lambda_policy_plot", False))
-    )
-
-    if not scenarios:
-        print("\nNo Layer 4 scenarios found.")
-        return pd.DataFrame(), None
-
-    rows = []
-    policy_plot_rows = []
-    moment_labels = moment_names(config)
-    m_data = compute_moments(df, config)
-
-    for scenario in scenarios:
-        label = str(scenario.get("label", "scenario"))
-        theta_overrides = scenario.get("theta_overrides", {})
-        model_overrides = scenario.get("model_overrides", {})
-        simulation_overrides = scenario.get("simulation_overrides", {})
-        dp_overrides = scenario.get("dp_overrides", {})
-
-        theta_run = _apply_theta_overrides(base_theta, theta_overrides=theta_overrides)
-        config_run = _apply_dp_overrides(config, dp_overrides=dp_overrides)
-        config_run = _apply_model_overrides(config_run, model_overrides=model_overrides)
-        config_run = _apply_simulation_overrides(
-            config_run, simulation_overrides=simulation_overrides
-        )
-
-        fixed_params_run = get_fixed_params(config_run, theta=theta_run)
-
-        print("\n========================================")
-        print(f"LAYER 4 STRUCTURAL DIAGNOSTIC: {label}")
-        print("========================================")
-        print(f"theta = {theta_run}")
-        print(f"theta_overrides = {theta_overrides}")
-        print(f"model_overrides = {model_overrides}")
-        print(f"simulation_overrides = {simulation_overrides}")
-        print(f"dp_overrides = {dp_overrides}")
-
-        solution = solve_investment_dp(
-            theta=theta_run,
-            config=config_run,
-            fixed_params=fixed_params_run,
-        )
-
-        sim_df = simulate_panel(theta_run, config_run, solution=solution)
-        m_sim = compute_moments(sim_df, config_run)
-
-        if make_plots:
-            plot_investment_policy_heatmap(solution)
-            plot_capital_distribution(sim_df)
-
-        print_solver_diagnostics(solution)
-        print_vector_with_labels(
-            title=f"{label} simulated moments",
-            labels=moment_labels,
-            values=m_sim,
-        )
-        print_vector_with_labels(
-            title=f"{label} moment gaps (simulated - data)",
-            labels=moment_labels,
-            values=(m_sim - m_data),
-        )
-
-        p_grid = solution["p_grid"]
-        k_grid = solution["k_grid"]
-        z_grid = solution["z_grid"]
-        policy_i = solution["policy_investment"]
-
-        ik = len(k_grid) // 2
-        iz = len(z_grid) // 2
-
-        for ip, cash_state in enumerate(p_grid):
-            policy_plot_rows.append(
-                {
-                    "scenario_label": label,
-                    "lambda_external_finance": float(theta_run[1]),
-                    "cash_state": float(cash_state),
-                    "investment_policy": float(policy_i[ik, ip, iz]),
-                    "representative_k": float(k_grid[ik]),
-                    "representative_z": float(z_grid[iz]),
-                }
-            )
-
-        sim_cfg = config_run.get("simulation", {})
-
-        row = {
-            "scenario_label": label,
-            "psi": float(theta_run[0]),
-            "lambda_external_finance": float(theta_run[1]),
-            "rho": float(theta_run[2]),
-            "sigma": float(theta_run[3]),
-            "fixed_cost": float(config_run["model"]["fixed_cost"]),
-            "production_scale": float(config_run["model"]["production_scale"]),
-            "alpha": float(config_run["model"]["alpha"]),
-            "delta": float(config_run["model"]["delta"]),
-            "cash_return_rate": float(config_run["model"]["cash_return_rate"]),
-            "initial_cash_ratio": float(sim_cfg.get("initial_cash_ratio", np.nan)),
-            "asset_multiplier": float(sim_cfg.get("asset_multiplier", np.nan)),
-            "k_max": float(config_run["dp"]["k_max"]),
-            "p_max": float(config_run["dp"]["p_max"]),
-            "investment_max": float(config_run["dp"]["investment_max"]),
-            "investment_min": float(config_run["dp"]["investment_min"]),
-            "k_grid_size": int(config_run["dp"]["k_grid_size"]),
-            "p_grid_size": int(config_run["dp"]["p_grid_size"]),
-            "z_grid_size": int(config_run["dp"]["z_grid_size"]),
-            "control_grid_size": int(config_run["dp"]["control_grid_size"]),
-            "cash_control_grid_size": int(config_run["dp"]["cash_control_grid_size"]),
-            "dp_converged": bool(solution["converged"]),
-            "dp_iterations": int(solution["n_iter"]),
-            "dp_bellman_sup_norm": float(solution["max_diff"]),
-            "share_lower_bound": float(solution["share_lower_bound"]),
-            "share_upper_bound": float(solution["share_upper_bound"]),
-            "share_any_bound": float(solution["share_any_bound"]),
-            "share_interior": float(solution["share_interior"]),
-            "mean_abs_gap": float(np.mean(np.abs(m_sim - m_data))),
-            "max_abs_gap": float(np.max(np.abs(m_sim - m_data))),
-        }
-
-        for name, sim_val, data_val in zip(moment_labels, m_sim, m_data):
-            row[f"sim_{name}"] = float(sim_val)
-            row[f"data_{name}"] = float(data_val)
-            row[f"gap_{name}"] = float(sim_val - data_val)
-
-        rows.append(row)
-
-    df_diag = pd.DataFrame(rows)
-    output_path = save_diagnostic_table(df_diag, "layer4_structural_diagnostics.csv")
-
-    policy_plot_csv = None
-    policy_plot_png = None
-
-    if policy_plot_rows:
-        policy_plot_df = pd.DataFrame(policy_plot_rows)
-        policy_plot_csv = save_diagnostic_table(
-            policy_plot_df,
-            "layer4_policy_plot_data.csv",
-        )
-
-        if save_policy_plot:
-            policy_plot_png = save_layer4_policy_plot(
-                policy_rows=policy_plot_rows,
-                filename="layer4_policy_comparison.png",
-            )
-
-    print("\nSaved Layer 4 structural diagnostics:")
-    print(output_path)
-    if policy_plot_csv is not None:
-        print(f"Saved Layer 4 policy plot data: {policy_plot_csv}")
-    if policy_plot_png is not None:
-        print(f"Saved Layer 4 policy plot image: {policy_plot_png}")
-
-    return df_diag, output_path
-
-
 def main():
+    run_start = time.perf_counter()
+
     config = load_config("settings.json")
-    debug_mode = bool(config.get("debug_mode", False))
-    validation_mode = config.get("validation_mode", "fast")
+    log_file, original_stdout, original_stderr = setup_logging(config)
 
-    print("\n========================================")
-    print("CONFIG LOAD CHECK")
-    print("========================================")
-    print(f"Loaded theta0 from config: {config['theta0']}")
-    print(f"Loaded bounds from config: {config['bounds']}")
-    print(
-        "Loaded optimizer method from config: "
-        f"{config.get('smm_optimizer_method', 'Nelder-Mead')}"
-    )
-    print(
-        "Loaded optimizer options from config: "
-        f"{config.get('smm_optimizer_options', {})}"
-    )
+    try:
+        debug_mode = bool(config.get("debug_mode", False))
+        validation_mode = config.get("validation_mode", "fast")
 
-    if config.get("rebuild_data", False):
-        build_compustat(
-            raw_path=config["raw_data_path"],
-            clean_path=config["clean_data_path"],
-            config=config,
+        run_full_sample = bool(config.get("run_full_sample", True))
+        run_small_firms = bool(config.get("run_small_firms", True))
+        run_large_firms = bool(config.get("run_large_firms", True))
+
+        print_section("RUN START")
+        print(f"Timestamp: {timestamp_now()}")
+
+        print_section("CONFIG LOAD CHECK")
+        print(f"Loaded theta0 from config: {config['theta0']}")
+        print(f"Loaded bounds from config: {config['bounds']}")
+        print(
+            "Loaded optimizer method from config: "
+            f"{config.get('smm_optimizer_method', 'Nelder-Mead')}"
         )
+        print(
+            "Loaded optimizer options from config: "
+            f"{config.get('smm_optimizer_options', {})}"
+        )
+        print(f"Run full sample: {run_full_sample}")
+        print(f"Run small firms: {run_small_firms}")
+        print(f"Run large firms: {run_large_firms}")
 
-    df = load_clean_data(config["clean_data_path"])
+        if config.get("rebuild_data", False):
+            print_step("REBUILD CLEAN DATA")
+            rebuild_start = time.perf_counter()
 
-    summary_df, summary_csv, summary_tex = save_summary_statistics_table(
-        df=df,
-        decimals=4,
-    )
-
-    spec = estimation_spec(config)
-    theta0 = np.asarray(spec["theta0"], dtype=float)
-
-    print("\n========================================")
-    print("DERIVATIVE-FREE CAPPED SMM TEST RUN")
-    print("========================================")
-    print(f"Debug mode: {debug_mode}")
-    print(f"Validation mode: {validation_mode}")
-    print(f"Number of targeted moments: {config['n_moments']}")
-    print(f"Targeted moments: {moment_names(config)}")
-    print(f"Starting theta0: {theta0}")
-    print(f"Bounds: {config['bounds']}")
-    print(
-        "Optimizer method: "
-        f"{config.get('smm_optimizer_method', 'Nelder-Mead')}"
-    )
-    print(
-        "Optimizer options: "
-        f"{config.get('smm_optimizer_options', {})}"
-    )
-
-    diag_cfg = config.get("optimizer_diagnostics", {})
-    diagnostics_enabled = bool(diag_cfg.get("enabled", False))
-    diagnostics_only = bool(diag_cfg.get("diagnostics_only", False))
-
-    if diagnostics_enabled:
-        print("\n========================================")
-        print("LAYER 2 OPTIMIZATION DIAGNOSTICS")
-        print("========================================")
-        print(f"Diagnostics only mode: {diagnostics_only}")
-        print(f"Run baseline check in diagnostics: {bool(diag_cfg.get('run_baseline_check', False))}")
-        print(f"Compute standard errors in diagnostics: {bool(diag_cfg.get('compute_standard_errors', False))}")
-        print(f"Make plots in diagnostics: {bool(diag_cfg.get('make_plots', False))}")
-
-        if bool(diag_cfg.get("run_budget_sweep", False)):
-            run_optimizer_budget_diagnostics(
-                df=df,
-                config=config,
-                theta0=theta0,
-            )
-
-        if bool(diag_cfg.get("run_multi_start", False)):
-            run_multistart_diagnostics(
-                df=df,
+            build_compustat(
+                raw_path=config["raw_data_path"],
+                clean_path=config["clean_data_path"],
                 config=config,
             )
 
-        if diagnostics_only:
-            print("\nDiagnostics-only mode enabled. Skipping full sample/subsample estimation.")
-            print(f"Summary statistics CSV: {summary_csv}")
-            print(f"Summary statistics TEX: {summary_tex}")
-            print("\nRun complete.")
-            return
+            rebuild_elapsed = time.perf_counter() - rebuild_start
+            print(f"Rebuild-data elapsed time: {format_seconds(rebuild_elapsed)}")
 
-    layer3_cfg = config.get("layer3_diagnostics", {})
-    layer3_enabled = bool(layer3_cfg.get("enabled", False))
-    layer3_diagnostics_only = bool(layer3_cfg.get("diagnostics_only", False))
+        print_step("LOAD CLEAN DATA")
+        load_start = time.perf_counter()
+        df = load_clean_data(config["clean_data_path"])
+        load_elapsed = time.perf_counter() - load_start
+        print(f"Loaded clean data with {len(df)} observations.")
+        print(f"Load-data elapsed time: {format_seconds(load_elapsed)}")
 
-    if layer3_enabled:
-        print("\n========================================")
-        print("LAYER 3 GRID / BOUND DIAGNOSTICS")
-        print("========================================")
-        print(f"Diagnostics only mode: {layer3_diagnostics_only}")
-        print(f"Fixed theta: {layer3_cfg.get('fixed_theta', config['theta0'])}")
-
-        run_layer3_fixed_theta_diagnostics(
+        print_step("SAVE SUMMARY STATISTICS")
+        summary_start = time.perf_counter()
+        summary_df, summary_csv, summary_tex = save_summary_statistics_table(
             df=df,
-            config=config,
-        )
-
-        if layer3_diagnostics_only:
-            print("\nLayer 3 diagnostics-only mode enabled. Skipping full sample/subsample estimation.")
-            print(f"Summary statistics CSV: {summary_csv}")
-            print(f"Summary statistics TEX: {summary_tex}")
-            print("\nRun complete.")
-            return
-
-    layer4_cfg = config.get("layer4_diagnostics", {})
-    layer4_enabled = bool(layer4_cfg.get("enabled", False))
-    layer4_diagnostics_only = bool(layer4_cfg.get("diagnostics_only", False))
-
-    if layer4_enabled:
-        print("\n========================================")
-        print("LAYER 4 STRUCTURAL DIAGNOSTICS")
-        print("========================================")
-        print(f"Diagnostics only mode: {layer4_diagnostics_only}")
-        print(f"Fixed theta: {layer4_cfg.get('fixed_theta', config['theta0'])}")
-
-        run_layer4_structural_diagnostics(
-            df=df,
-            config=config,
-        )
-
-        if layer4_diagnostics_only:
-            print("\nLayer 4 diagnostics-only mode enabled. Skipping full sample/subsample estimation.")
-            print(f"Summary statistics CSV: {summary_csv}")
-            print(f"Summary statistics TEX: {summary_tex}")
-            print("\nRun complete.")
-            return
-
-    full_results = run_single_estimation(
-        df=df,
-        config=config,
-        sample_label="full_sample",
-        theta0=theta0,
-        save_outputs=True,
-        make_plots=True,
-        run_baseline_check=True,
-        compute_standard_errors=True,
-    )
-
-    small_df, large_df, split_info = build_size_tercile_subsamples(df)
-
-    print("\n========================================")
-    print("SIZE TERCILE SUBSAMPLES")
-    print("========================================")
-    print(f"Size variable: {split_info['size_variable']}")
-    print(f"33rd percentile: {split_info['q33']:.6f}")
-    print(f"67th percentile: {split_info['q67']:.6f}")
-    print(f"Small-firm observations: {split_info['n_small']}")
-    print(f"Large-firm observations: {split_info['n_large']}")
-
-    small_results = run_single_estimation(
-        df=small_df,
-        config=config,
-        sample_label="small_firms",
-        theta0=theta0,
-        save_outputs=True,
-        make_plots=False,
-        run_baseline_check=True,
-        compute_standard_errors=True,
-    )
-
-    large_results = run_single_estimation(
-        df=large_df,
-        config=config,
-        sample_label="large_firms",
-        theta0=theta0,
-        save_outputs=True,
-        make_plots=False,
-        run_baseline_check=True,
-        compute_standard_errors=True,
-    )
-
-    subsample_comparison_df, subsample_comparison_csv, subsample_comparison_tex = (
-        save_subsample_comparison_table(
-            full_sample=full_results,
-            small_firms=small_results,
-            large_firms=large_results,
-            split_info=split_info,
             decimals=4,
         )
-    )
+        summary_elapsed = time.perf_counter() - summary_start
+        print(f"Summary-statistics elapsed time: {format_seconds(summary_elapsed)}")
 
-    print("\n========================================")
-    print("SUBSAMPLE PARAMETER COMPARISON TABLE")
-    print("========================================")
-    print(subsample_comparison_df.to_string(index=False))
+        spec = estimation_spec(config)
+        theta0 = np.asarray(spec["theta0"], dtype=float)
 
-    print("\n========================================")
-    print("SUMMARY STATISTICS TABLE")
-    print("========================================")
-    print(summary_df.to_string(index=False))
+        print_section("FULL SMM ESTIMATION RUN")
+        print(f"Debug mode: {debug_mode}")
+        print(f"Validation mode: {validation_mode}")
+        print(f"Number of targeted moments: {config['n_moments']}")
+        print(f"Targeted moments: {moment_names(config)}")
+        print(f"Starting theta0: {theta0}")
+        print(f"Bounds: {config['bounds']}")
+        print(
+            "Optimizer method: "
+            f"{config.get('smm_optimizer_method', 'Nelder-Mead')}"
+        )
+        print(
+            "Optimizer options: "
+            f"{config.get('smm_optimizer_options', {})}"
+        )
 
-    print("\n========================================")
-    print("FILES SAVED")
-    print("========================================")
-    print(f"Summary statistics CSV: {summary_csv}")
-    print(f"Summary statistics TEX: {summary_tex}")
+        full_results = None
+        small_results = None
+        large_results = None
+        subsample_comparison_csv = None
+        subsample_comparison_tex = None
 
-    for label, results_dict in [
-        ("Full sample", full_results),
-        ("Small firms", small_results),
-        ("Large firms", large_results),
-    ]:
-        print(f"\n{label}")
-        for key, value in results_dict["saved_paths"].items():
-            print(f"  {key}: {value}")
+        small_df = None
+        large_df = None
+        split_info = None
 
-    print(f"\nSubsample comparison CSV: {subsample_comparison_csv}")
-    print(f"Subsample comparison TEX: {subsample_comparison_tex}")
+        if run_full_sample:
+            print(f"\n[{timestamp_now()}] Starting full_sample estimation...")
+            full_results = run_single_estimation(
+                df=df,
+                config=config,
+                sample_label="full_sample",
+                theta0=theta0,
+                save_outputs=True,
+                make_plots=True,
+            )
+            print(f"[{timestamp_now()}] Finished full_sample estimation.")
+            print(f"Elapsed time: {format_seconds(full_results['elapsed_seconds'])}")
 
-    print("\nRun complete.")
+        if run_small_firms or run_large_firms:
+            print_step("BUILD SIZE TERCILE SUBSAMPLES")
+            split_start = time.perf_counter()
+
+            small_df, large_df, split_info = build_size_tercile_subsamples(df)
+
+            print_section("SIZE TERCILE SUBSAMPLES")
+            print(f"Size variable: {split_info['size_variable']}")
+            print(f"33rd percentile: {split_info['q33']:.6f}")
+            print(f"67th percentile: {split_info['q67']:.6f}")
+            print(f"Small-firm observations: {split_info['n_small']}")
+            print(f"Large-firm observations: {split_info['n_large']}")
+
+            split_elapsed = time.perf_counter() - split_start
+            print(f"Subsample-build elapsed time: {format_seconds(split_elapsed)}")
+
+        if run_small_firms:
+            print(f"\n[{timestamp_now()}] Starting small_firms estimation...")
+            small_results = run_single_estimation(
+                df=small_df,
+                config=config,
+                sample_label="small_firms",
+                theta0=theta0,
+                save_outputs=True,
+                make_plots=False,
+            )
+            print(f"[{timestamp_now()}] Finished small_firms estimation.")
+            print(f"Elapsed time: {format_seconds(small_results['elapsed_seconds'])}")
+
+        if run_large_firms:
+            print(f"\n[{timestamp_now()}] Starting large_firms estimation...")
+            large_results = run_single_estimation(
+                df=large_df,
+                config=config,
+                sample_label="large_firms",
+                theta0=theta0,
+                save_outputs=True,
+                make_plots=False,
+            )
+            print(f"[{timestamp_now()}] Finished large_firms estimation.")
+            print(f"Elapsed time: {format_seconds(large_results['elapsed_seconds'])}")
+
+        if (
+            run_full_sample
+            and run_small_firms
+            and run_large_firms
+            and full_results is not None
+            and small_results is not None
+            and large_results is not None
+        ):
+            print_step("SAVE SUBSAMPLE COMPARISON TABLE")
+            subsample_start = time.perf_counter()
+
+            subsample_comparison_df, subsample_comparison_csv, subsample_comparison_tex = (
+                save_subsample_comparison_table(
+                    full_sample=full_results,
+                    small_firms=small_results,
+                    large_firms=large_results,
+                    split_info=split_info,
+                    decimals=4,
+                )
+            )
+
+            print_section("SUBSAMPLE PARAMETER COMPARISON TABLE")
+            print(subsample_comparison_df.to_string(index=False))
+
+            subsample_elapsed = time.perf_counter() - subsample_start
+            print(f"Subsample-comparison elapsed time: {format_seconds(subsample_elapsed)}")
+        else:
+            subsample_comparison_df = None
+
+        print_section("SUMMARY STATISTICS TABLE")
+        print(summary_df.to_string(index=False))
+
+        print_section("FILES SAVED")
+        print(f"Summary statistics CSV: {summary_csv}")
+        print(f"Summary statistics TEX: {summary_tex}")
+
+        results_to_print = []
+        if full_results is not None:
+            results_to_print.append(("Full sample", full_results))
+        if small_results is not None:
+            results_to_print.append(("Small firms", small_results))
+        if large_results is not None:
+            results_to_print.append(("Large firms", large_results))
+
+        for label, results_dict in results_to_print:
+            print(f"\n{label}")
+            for key, value in results_dict["saved_paths"].items():
+                print(f"  {key}: {value}")
+
+        if subsample_comparison_csv is not None:
+            print(f"\nSubsample comparison CSV: {subsample_comparison_csv}")
+            print(f"Subsample comparison TEX: {subsample_comparison_tex}")
+
+        total_elapsed = time.perf_counter() - run_start
+
+        print_section("RUN COMPLETE")
+        print(f"End timestamp: {timestamp_now()}")
+        print(f"Total elapsed time: {format_seconds(total_elapsed)}")
+
+    finally:
+        teardown_logging(log_file, original_stdout, original_stderr)
 
 
 if __name__ == "__main__":

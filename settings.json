@@ -1,6 +1,13 @@
 {
-  "debug_mode": true,
+  "debug_mode": false,
   "validation_mode": "medium",
+
+  "run_full_sample": false,
+  "run_small_firms": true,
+  "run_large_firms": false,
+
+  "save_terminal_output": true,
+  "terminal_output_path": "results/logs/runSMM_small_firms_final.log",
 
   "rebuild_data": false,
   "raw_data_path": "data/raw/compustat_raw.csv",
@@ -18,8 +25,8 @@
   "smm_optimizer_method": "Nelder-Mead",
 
   "smm_optimizer_options": {
-    "maxiter": 20,
-    "maxfev": 40,
+    "maxiter": 60,
+    "maxfev": 120,
     "xatol": 0.001,
     "fatol": 0.001,
     "adaptive": true
@@ -33,7 +40,7 @@
     "compute_standard_errors": false,
     "make_plots": false,
 
-    "run_budget_sweep": true,
+    "run_budget_sweep": false,
     "budget_sweep": [
       {
         "label": "budget_20_40",
@@ -47,7 +54,7 @@
       }
     ],
 
-    "run_multi_start": true,
+    "run_multi_start": false,
     "multi_start_thetas": [
       {
         "label": "start_best_current",
@@ -104,7 +111,7 @@
   },
 
   "layer4_diagnostics": {
-    "enabled": true,
+    "enabled": false,
     "diagnostics_only": true,
     "make_plots": false,
     "save_lambda_policy_plot": false,
