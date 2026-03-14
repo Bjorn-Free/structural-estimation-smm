@@ -3,6 +3,24 @@
 This repository contains the Python implementation of the structural dynamic model estimated in the accompanying course report. The project implements a firm-level dynamic programming model with investment, cash holdings, productivity shocks, convex capital adjustment costs, and costly external finance, 
 and estimates the structural parameters using simulated method of moments (SMM).
 
+## Replication Notes on Estimation Settings
+
+The structural SMM estimation is computationally intensive. The final version of the code provided in this repository runs the full-sample and both subsample estimations using the same optimizer limits specified in `settings.json`:
+
+- `maxiter = 75`
+- `maxfev = 150`
+
+These limits apply to all three analyses when the code is executed from the repository.
+
+In the results reported in the paper, the full-sample estimation was run using the same limits (75 iterations and 150 function evaluations). However, due to computational constraints, the subsample estimations (small firms and large firms) were run with tighter limits:
+
+- `maxiter = 35`
+- `maxfev = 70`
+
+This difference was necessary to complete the full set of estimation runs within available compute time.
+
+Running the full-sample and both subsample estimations with the current repository settings (75/150 for all runs) takes approximately **36 hours** on a standard laptop environment.
+
 ## Main script
 
 ### `runSMM.py`
