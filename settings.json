@@ -1,13 +1,13 @@
 {
   "debug_mode": false,
-  "validation_mode": "medium",
+  "validation_mode": "full",
 
-  "run_full_sample": false,
-  "run_small_firms": false,
+  "run_full_sample": true,
+  "run_small_firms": true,
   "run_large_firms": true,
 
   "save_terminal_output": true,
-  "terminal_output_path": "results/logs/runSMM_large_firms_final.log",
+  "terminal_output_path": "results/logs/runSMM_subsamples_final.log",
 
   "rebuild_data": false,
   "raw_data_path": "data/raw/compustat_raw.csv",
@@ -25,8 +25,8 @@
   "smm_optimizer_method": "Nelder-Mead",
 
   "smm_optimizer_options": {
-    "maxiter": 60,
-    "maxfev": 120,
+    "maxiter": 75,
+    "maxfev": 150,
     "xatol": 0.001,
     "fatol": 0.001,
     "adaptive": true
